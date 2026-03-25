@@ -1,0 +1,17 @@
+{
+  "name": "pixelz-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "zod": "^3.22.4",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

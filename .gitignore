@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+dist/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment & credentials
+.env
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test cache
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Logs
+*.log
+
+# Claude Code local settings
+.claude/
+
+# API reference docs (local-only, not for distribution)
+PixelzPlatformAPIdocs.txt
+pixelz-automation-api.json
+
+# Project specs (local-only, not for distribution)
+requirements.md
