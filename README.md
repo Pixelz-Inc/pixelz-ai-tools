@@ -9,7 +9,7 @@ Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your 
 | Requirement | Version | Check |
 |-------------|---------|-------|
 | Node.js | v18 or higher | `node --version` |
-| npm | v8 or higher | `npm --version` |
+| pnpm | v10 or higher | `pnpm --version` |
 | Python | v3.10 or higher | `python --version` |
 | pip | any recent version | `pip --version` |
 
@@ -121,7 +121,7 @@ pixelz-ai-tools/
 
 ```bash
 # Node.js
-cd tests/node && npm install && npx vitest run
+cd tests/node && pnpm install && pnpm exec vitest run
 
 # Python
 pip install -r tests/python/requirements.txt
