@@ -107,10 +107,10 @@ if [ "$TRACK_CHOICE" == "1" ]; then
     fi
 
     if [ "$LANG_PREF" == "node" ]; then
-        npm install || { echo "Root npm install failed."; exit 1; }
-        (cd "$PROJECT_ROOT/mcp-servers/platform/node" && npm install && npm run build) \
+        pnpm install || { echo "Root pnpm install failed."; exit 1; }
+        (cd "$PROJECT_ROOT/mcp-servers/platform/node" && pnpm install && pnpm run build) \
             || { echo "Platform MCP build failed."; exit 1; }
-        (cd "$PROJECT_ROOT/mcp-servers/automation/node" && npm install && npm run build) \
+        (cd "$PROJECT_ROOT/mcp-servers/automation/node" && pnpm install && pnpm run build) \
             || { echo "Automation MCP build failed."; exit 1; }
     else
         pip install -r requirements.txt || { echo "pip install (root) failed."; exit 1; }
@@ -193,10 +193,11 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
 
         if [ "$LANG_PREF" == "node" ]; then
             cp "$PROJECT_ROOT/package.json" "$TARGET_PATH/package.json"
-            [ -f "$PROJECT_ROOT/package-lock.json" ] && \
-                cp "$PROJECT_ROOT/package-lock.json" "$TARGET_PATH/package-lock.json"
-            (cd "$TARGET_PATH" && npm install) \
-                || { echo "npm install in local target failed."; exit 1; }
+            cp "$PROJECT_ROOT/.npmrc" "$TARGET_PATH/.npmrc"
+            [ -f "$PROJECT_ROOT/pnpm-lock.yaml" ] && \
+                cp "$PROJECT_ROOT/pnpm-lock.yaml" "$TARGET_PATH/pnpm-lock.yaml"
+            (cd "$TARGET_PATH" && pnpm install) \
+                || { echo "pnpm install in local target failed."; exit 1; }
         else
             cp "$PROJECT_ROOT/requirements.txt" "$TARGET_PATH/requirements.txt"
             pip install -r "$TARGET_PATH/requirements.txt" \
@@ -220,7 +221,7 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
         fi
 
         if [ "$LANG_PREF" == "node" ]; then
-            npm install || { echo "npm install failed."; exit 1; }
+            pnpm install || { echo "pnpm install failed."; exit 1; }
         else
             pip install -r requirements.txt || { echo "pip install failed."; exit 1; }
         fi

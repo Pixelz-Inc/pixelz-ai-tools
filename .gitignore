@@ -36,6 +36,7 @@ venv/
 
 # Claude Code local settings
 .claude/
+CLAUDE.md
 
 # API reference docs (local-only, not for distribution)
 PixelzPlatformAPIdocs.txt

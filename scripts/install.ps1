@@ -90,16 +90,16 @@ if ($trackChoice -eq 1) {
     }
 
     if ($langPref -eq "node") {
-        npm install
+        pnpm install
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "Root npm install failed."
+            Write-Error "Root pnpm install failed."
             Pop-Location
             exit 1
         }
 
         Push-Location (Join-Path $ProjectRoot "mcp-servers\platform\node")
-        npm install
-        npm run build
+        pnpm install
+        pnpm run build
         $buildOk = $LASTEXITCODE
         Pop-Location
         if ($buildOk -ne 0) {
@@ -109,8 +109,8 @@ if ($trackChoice -eq 1) {
         }
 
         Push-Location (Join-Path $ProjectRoot "mcp-servers\automation\node")
-        npm install
-        npm run build
+        pnpm install
+        pnpm run build
         $buildOk = $LASTEXITCODE
         Pop-Location
         if ($buildOk -ne 0) {
@@ -212,16 +212,17 @@ if ($trackChoice -eq 1) {
 
         if ($langPref -eq "node") {
             Copy-Item (Join-Path $ProjectRoot "package.json") (Join-Path $targetPath "package.json") -Force
-            $lockFile = Join-Path $ProjectRoot "package-lock.json"
+            Copy-Item (Join-Path $ProjectRoot ".npmrc") (Join-Path $targetPath ".npmrc") -Force
+            $lockFile = Join-Path $ProjectRoot "pnpm-lock.yaml"
             if (Test-Path $lockFile) {
-                Copy-Item $lockFile (Join-Path $targetPath "package-lock.json") -Force
+                Copy-Item $lockFile (Join-Path $targetPath "pnpm-lock.yaml") -Force
             }
             Push-Location $targetPath
-            npm install
+            pnpm install
             $installOk = $LASTEXITCODE
             Pop-Location
             if ($installOk -ne 0) {
-                Write-Error "npm install in local target failed."
+                Write-Error "pnpm install in local target failed."
                 Pop-Location
                 exit 1
             }
@@ -254,9 +255,9 @@ if ($trackChoice -eq 1) {
         }
 
         if ($langPref -eq "node") {
-            npm install
+            pnpm install
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "npm install failed."
+                Write-Error "pnpm install failed."
                 Pop-Location
                 exit 1
             }
