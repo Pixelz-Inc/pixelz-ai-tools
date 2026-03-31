@@ -108,6 +108,7 @@ def main():
     upload.add_argument('--markerY', type=int)
     upload.add_argument('--outputFileName')
     upload.add_argument('--customerImageColorID')
+    upload.add_argument('--colorwayIds', help='JSON array of color library IDs, e.g. "[123,456]"')
 
     white_glove = subparsers.add_parser('white-glove')
     white_glove.add_argument('input')
@@ -173,6 +174,9 @@ def main():
 
     subparsers.add_parser('get-contact')
 
+    add_color_lib = subparsers.add_parser('add-color-library')
+    add_color_lib.add_argument('images', nargs='+', help='One or more local paths or URLs of swatch images')
+
     get_invoices = subparsers.add_parser('get-invoices')
     get_invoices.add_argument('--fromDate')
     get_invoices.add_argument('--toDate')
@@ -203,8 +207,10 @@ def main():
         elif args.command == 'upload':
             log('info', 'upload', {'template': args.template})
             url = ensure_url(args.input)
-            payload = {**auth, 'imageURL': url, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command', 'input', 'template']}}
+            payload = {**auth, 'imageURL': url, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command', 'input', 'template', 'colorwayIds']}}
             payload['templateId'] = args.template
+            if args.colorwayIds:
+                payload['colorwayIds'] = json.loads(args.colorwayIds)
             print_checked(requests.post(f"{BASE_URL}/Image", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'white-glove':
             log('info', 'white-glove')
@@ -251,6 +257,11 @@ def main():
         elif args.command == 'get-contact':
             log('info', 'get-contact')
             print_checked(requests.get(f"{BASE_URL}/Contact", params=auth, timeout=REQUEST_TIMEOUT))
+        elif args.command == 'add-color-library':
+            log('info', 'add-color-library', {'count': len(args.images)})
+            resolved_urls = [ensure_url(p) for p in args.images]
+            payload = {**auth, 'imagesUrl': resolved_urls}
+            print_checked(requests.post(f"{BASE_URL}/AddColorLibrary", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'get-invoices':
             log('info', 'get-invoices')
             params = {**auth, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command']}}

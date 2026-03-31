@@ -100,7 +100,7 @@ def upload_image(imagePath: str, templateId: str, customerImageId: str = None, p
                  imageURL2: str = None, imageURL3: str = None, imageURL4: str = None, imageURL5: str = None,
                  colorReferenceFileURL: str = None, swatchImageURL: str = None, swatchColorCode: str = None,
                  markerX: float = None, markerY: float = None, outputFileName: str = None,
-                 customerImageColorID: str = None) -> str:
+                 customerImageColorID: str = None, colorwayIds: list[int] = None) -> str:
     """Submit an image for professional manual retouching. Accepts a local file path or public URL — local files are uploaded to S3 automatically. Returns an ImageTicket GUID; use get_image_status to track progress."""
     try:
         log('info', 'Tool called: upload_image', {'templateId': templateId})
@@ -116,7 +116,8 @@ def upload_image(imagePath: str, templateId: str, customerImageId: str = None, p
             'colorReferenceFileURL': colorReferenceFileURL,
             'swatchImageURL': swatchImageURL, 'swatchColorCode': swatchColorCode,
             'markerX': markerX, 'markerY': markerY,
-            'outputFileName': outputFileName, 'customerImageColorID': customerImageColorID
+            'outputFileName': outputFileName, 'customerImageColorID': customerImageColorID,
+            'colorwayIds': colorwayIds
         }.items() if v is not None}
         data = requests.post(f"{BASE_URL}/Image", json=payload, timeout=REQUEST_TIMEOUT).json()
         check_api_error(data)
@@ -275,6 +276,22 @@ def get_invoices(fromDate: str = None, toDate: str = None, page: int = 1, return
         return json.dumps(data, indent=2)
     except Exception as e:
         log('error', 'get_invoices failed', {'error': str(e)})
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def add_color_library(imagesPath: list[str]) -> str:
+    """Register color reference images (swatches) for use with color matching. Returns colorwayIds that can be passed to upload_image. Accepts local file paths or public URLs — local files are uploaded to S3 automatically."""
+    try:
+        log('info', 'Tool called: add_color_library', {'count': len(imagesPath)})
+        if not imagesPath:
+            raise ValueError("imagesPath must contain at least one image path or URL")
+        resolved_urls = [ensure_url(p) for p in imagesPath]
+        payload = {**get_auth(), 'imagesUrl': resolved_urls}
+        data = requests.post(f"{BASE_URL}/AddColorLibrary", json=payload, timeout=REQUEST_TIMEOUT).json()
+        check_api_error(data)
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        log('error', 'add_color_library failed', {'error': str(e)})
         return f"Error: {str(e)}"
 
 if __name__ == "__main__":

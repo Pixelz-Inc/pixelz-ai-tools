@@ -209,6 +209,18 @@ const commands = {
         });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
+    },
+    'add-color-library': async (...imagePaths) => {
+        log('info', 'add-color-library', { count: imagePaths.length });
+        if (imagePaths.length === 0) {
+            console.error('Usage: node cli.js add-color-library <path|url> [path|url] ...');
+            process.exit(1);
+        }
+        const resolvedUrls = await Promise.all(imagePaths.map(p => ensureUrl(p)));
+        const payload = { ...getAuthParams(), imagesUrl: resolvedUrls };
+        const res = await axios.post(`${BASE_URL}/AddColorLibrary`, payload, { timeout: REQUEST_TIMEOUT });
+        checkApiError(res.data);
+        console.log(JSON.stringify(res.data, null, 2));
     }
 };
 
@@ -246,7 +258,10 @@ if (commands[cmd]) {
     (async () => {
         try {
             if (cmd === 'upload') {
+                if (options.colorwayIds) options.colorwayIds = JSON.parse(options.colorwayIds);
                 await commands.upload(filteredArgs[0], filteredArgs[1], options);
+            } else if (cmd === 'add-color-library') {
+                await commands['add-color-library'](...filteredArgs);
             } else if (cmd === 'white-glove') {
                 await commands['white-glove'](filteredArgs[0], options);
             } else if (cmd === 'stack') {
@@ -283,6 +298,9 @@ Commands:
   reject <ticket> <comment> [opts]        Request correction for delivered image
   get-contact                             Get account profile and balance
   get-invoices [--fromDate] [--toDate]    Get billing statements
+  add-color-library <path|url>...         Register color swatches, get colorwayIds
+
+Upload also accepts --colorwayIds='[123,456]' for color matching with registered swatches.
 
 Options use --key=value or --key value syntax.`);
 }

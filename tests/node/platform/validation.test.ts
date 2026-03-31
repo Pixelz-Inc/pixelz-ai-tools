@@ -22,6 +22,7 @@ const UploadImageSchema = z.object({
     markerX: z.number().optional(), markerY: z.number().optional(),
     outputFileName: z.string().optional(),
     customerImageColorID: z.string().optional(),
+    colorwayIds: z.array(z.number()).optional(),
 });
 
 const RejectImageSchema = z.object({
@@ -29,6 +30,10 @@ const RejectImageSchema = z.object({
     comment: z.string().min(1),
     markupImageUrl: z.string().optional(),
     customerImageId: z.string().optional(),
+});
+
+const AddColorLibrarySchema = z.object({
+    imagesPath: z.array(z.string().min(1)).min(1),
 });
 
 const ListImagesSchema = z.object({
@@ -95,6 +100,26 @@ describe('Platform Zod Schemas', () => {
                 imagePath: '/img.jpg', templateId: '123', markerX: 'abc'
             })).toThrow();
         });
+
+        it('accepts valid colorwayIds array', () => {
+            const result = UploadImageSchema.parse({
+                imagePath: '/img.jpg', templateId: '123', colorwayIds: [1, 2, 3]
+            });
+            expect(result.colorwayIds).toEqual([1, 2, 3]);
+        });
+
+        it('accepts upload without colorwayIds', () => {
+            const result = UploadImageSchema.parse({
+                imagePath: '/img.jpg', templateId: '123'
+            });
+            expect(result.colorwayIds).toBeUndefined();
+        });
+
+        it('rejects non-number values in colorwayIds', () => {
+            expect(() => UploadImageSchema.parse({
+                imagePath: '/img.jpg', templateId: '123', colorwayIds: ['abc']
+            })).toThrow();
+        });
     });
 
     describe('RejectImageSchema', () => {
@@ -114,6 +139,27 @@ describe('Platform Zod Schemas', () => {
 
         it('rejects missing imageTicket', () => {
             expect(() => RejectImageSchema.parse({ comment: 'fix it' })).toThrow();
+        });
+    });
+
+    describe('AddColorLibrarySchema', () => {
+        it('accepts valid input with array of URL strings', () => {
+            const result = AddColorLibrarySchema.parse({
+                imagesPath: ['https://example.com/swatch1.jpg', 'https://example.com/swatch2.jpg']
+            });
+            expect(result.imagesPath).toHaveLength(2);
+        });
+
+        it('rejects empty array', () => {
+            expect(() => AddColorLibrarySchema.parse({ imagesPath: [] })).toThrow();
+        });
+
+        it('rejects missing imagesPath', () => {
+            expect(() => AddColorLibrarySchema.parse({})).toThrow();
+        });
+
+        it('rejects empty string in array', () => {
+            expect(() => AddColorLibrarySchema.parse({ imagesPath: [''] })).toThrow();
         });
     });
 

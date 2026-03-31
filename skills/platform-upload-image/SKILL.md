@@ -9,7 +9,7 @@ This skill initiates the manual retouching process. Pixelz editors will receive 
 
 ## Command
 ```bash
-node cli-tools/platform/node/cli.js upload "<PATH_OR_URL>" --template <ID> [--imageURL2 <URL>] [--imageURL3 <URL>] [--imageURL4 <URL>] [--imageURL5 <URL>] [--colorReferenceFileURL <URL>] [--imageCallbackURL <URL>] [--customerImageId <ID>] [--productId <ID>] [--customerFolder <NAME>] [--imageDeadlineDateTimeUTC <DATETIME>] [--comment <TEXT>] [--markupImageUrl <URL>] [--swatchImageURL <URL>] [--swatchColorCode <HEX>] [--markerX <INT>] [--markerY <INT>] [--outputFileName <NAME>] [--customerImageColorID <ID>]
+node cli-tools/platform/node/cli.js upload "<PATH_OR_URL>" --template <ID> [--imageURL2 <URL>] [--imageURL3 <URL>] [--imageURL4 <URL>] [--imageURL5 <URL>] [--colorReferenceFileURL <URL>] [--imageCallbackURL <URL>] [--customerImageId <ID>] [--productId <ID>] [--customerFolder <NAME>] [--imageDeadlineDateTimeUTC <DATETIME>] [--comment <TEXT>] [--markupImageUrl <URL>] [--swatchImageURL <URL>] [--swatchColorCode <HEX>] [--markerX <INT>] [--markerY <INT>] [--outputFileName <NAME>] [--customerImageColorID <ID>] [--colorwayIds '<JSON_ARRAY>']
 ```
 
 ## Detailed Parameters
@@ -25,6 +25,7 @@ node cli-tools/platform/node/cli.js upload "<PATH_OR_URL>" --template <ID> [--im
 - `--comment`: (Optional) Free-text instructions for the retouching expert.
 - `--markupImageUrl`: (Optional) URL to an annotated image to guide editors.
 - `--swatchColorCode`: (Optional) Hex code for specific color matching (e.g., `"#FF0000"`).
+- `--colorwayIds`: (Optional) JSON array of color library IDs from `platform-add-color-library` (e.g., `"[123,456]"`). Used for color matching with registered swatches.
 
 ## Success Criteria
 - Confirm the image was successfully submitted.

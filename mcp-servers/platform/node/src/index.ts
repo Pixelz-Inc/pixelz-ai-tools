@@ -74,7 +74,7 @@ async function ensureUrl(input: string) {
     return DownloadUrl;
 }
 
-const server = new Server({ name: "pixelz-platform-mcp", version: "1.3.0" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "pixelz-platform-mcp", version: "1.4.0" }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
@@ -111,7 +111,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         swatchColorCode: { type: "string" },
                         markerX: { type: "number" }, markerY: { type: "number" },
                         outputFileName: { type: "string" },
-                        customerImageColorID: { type: "string" }
+                        customerImageColorID: { type: "string" },
+                        colorwayIds: { type: "array", items: { type: "number" }, description: "Array of color library IDs from add_color_library" }
                     },
                     required: ["imagePath", "templateId"]
                 }
@@ -243,6 +244,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     }
                 }
             },
+            {
+                name: "add_color_library",
+                description: "Register color reference images (swatches) for use with color matching. Returns colorwayIds that can be passed to upload_image. Accepts local file paths or public URLs — local files are uploaded to S3 automatically.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        imagesPath: { type: "array", items: { type: "string" }, description: "Array of local file paths or public URLs of color swatch images" }
+                    },
+                    required: ["imagesPath"]
+                }
+            },
         ],
     };
 });
@@ -268,6 +280,7 @@ const UploadImageSchema = z.object({
     markerX: z.number().optional(), markerY: z.number().optional(),
     outputFileName: z.string().optional(),
     customerImageColorID: z.string().optional(),
+    colorwayIds: z.array(z.number()).optional(),
 });
 
 const WhiteGloveSchema = z.object({
@@ -325,6 +338,10 @@ const RejectImageSchema = z.object({
     comment: z.string().min(1),
     markupImageUrl: z.string().optional(),
     customerImageId: z.string().optional(),
+});
+
+const AddColorLibrarySchema = z.object({
+    imagesPath: z.array(z.string().min(1)).min(1),
 });
 
 const GetInvoicesSchema = z.object({
@@ -412,6 +429,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 response = await axios.get(`${BASE_URL}/Invoices`, { params: { ...auth, ...p }, timeout: REQUEST_TIMEOUT });
                 break;
             }
+            case "add_color_library": {
+                const p = AddColorLibrarySchema.parse(args);
+                const resolvedUrls = await Promise.all(p.imagesPath.map(img => ensureUrl(img)));
+                response = await axios.post(`${BASE_URL}/AddColorLibrary`, { ...auth, imagesUrl: resolvedUrls }, { timeout: REQUEST_TIMEOUT });
+                break;
+            }
             default:
                 throw new Error("Unknown tool");
         }
@@ -438,7 +461,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 });
 
-export { server, getAuthParams, checkApiError, ensureUrl, validateId };
+export { server, getAuthParams, checkApiError, ensureUrl, validateId, AddColorLibrarySchema };
 
 if (process.env.NODE_ENV !== 'test') {
     const transport = new StdioServerTransport();
