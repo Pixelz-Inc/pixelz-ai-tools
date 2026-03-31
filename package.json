@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "description": "Connect Pixelz image retouching APIs to AI coding assistants via MCP servers and Agent Skills",
   "scripts": {
-    "setup:node": "npm install",
-    "test": "cd tests/node && npx vitest run",
+    "setup:node": "pnpm install",
+    "test": "cd tests/node && pnpm exec vitest run",
     "test:python": "cd tests/python && python -m pytest"
   },
   "dependencies": {
-    "axios": "^1.6.0",
+    "axios": "1.13.6",
     "dotenv": "^16.3.1"
   },
   "keywords": [
