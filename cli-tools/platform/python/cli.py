@@ -9,6 +9,16 @@ from dotenv import load_dotenv
 load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env')))
 
 BASE_URL = 'https://api.pixelz.com/REST.svc/JSON'
+
+def redact_secrets(text):
+    """Replace known credential values and bearer tokens in text with <REDACTED>."""
+    s = str(text)
+    for key in ('PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL'):
+        val = os.getenv(key)
+        if val:
+            s = s.replace(val, '<REDACTED>')
+    s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
+    return s
 REQUEST_TIMEOUT = 90
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
@@ -23,6 +33,16 @@ def log(level, message, data=None):
         entry += f" {json.dumps(data, default=str)}"
     with open(_log_file, 'a') as f:
         f.write(entry + '\n')
+
+STATUS_ALIASES = {
+    'new': '10', 'in production': '60', 'production finished': '70', 'delivered': '80'
+}
+
+def resolve_status(value):
+    if value is None:
+        return value
+    lower = str(value).lower()
+    return STATUS_ALIASES.get(lower, value)
 
 def validate_id(value, name):
     if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
@@ -231,10 +251,13 @@ def main():
             print_checked(requests.get(f"{BASE_URL}/Image/{args.ticket}", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'list-images':
             log('info', 'list-images')
+            if args.status: args.status = resolve_status(args.status)
+            if args.excludeImageStatus: args.excludeImageStatus = resolve_status(args.excludeImageStatus)
             params = {**auth, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command']}}
             print_checked(requests.get(f"{BASE_URL}/Images", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'count-images':
             log('info', 'count-images')
+            if args.status: args.status = resolve_status(args.status)
             params = {**auth, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command']}}
             print_checked(requests.get(f"{BASE_URL}/Images/Count", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'list-products':
@@ -269,9 +292,9 @@ def main():
 
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
-        print(f"[API_ERROR] {str(e)}", file=sys.stderr)
+        print(redact_secrets(f"[API_ERROR] {str(e)}"), file=sys.stderr)
         if hasattr(e, 'response') and e.response is not None:
-            print(e.response.text, file=sys.stderr)
+            print(redact_secrets(e.response.text), file=sys.stderr)
 
 if __name__ == "__main__":
     main()

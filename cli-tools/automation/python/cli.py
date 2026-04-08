@@ -11,6 +11,16 @@ from dotenv import load_dotenv
 load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env')))
 
 AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token'
+
+def redact_secrets(text):
+    """Replace known credential values and bearer tokens in text with <REDACTED>."""
+    s = str(text)
+    for key in ('PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'):
+        val = os.getenv(key)
+        if val:
+            s = s.replace(val, '<REDACTED>')
+    s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
+    return s
 BASE_URL = 'https://automation-api.pixelz.com/v1'
 REQUEST_TIMEOUT = 90
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
@@ -209,9 +219,9 @@ def main():
 
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
-        print(f"[API_ERROR] {str(e)}", file=sys.stderr)
+        print(redact_secrets(f"[API_ERROR] {str(e)}"), file=sys.stderr)
         if hasattr(e, 'response') and e.response is not None:
-            print(e.response.text, file=sys.stderr)
+            print(redact_secrets(e.response.text), file=sys.stderr)
 
 if __name__ == "__main__":
     main()

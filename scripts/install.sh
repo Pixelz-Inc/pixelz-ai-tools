@@ -102,15 +102,16 @@ if [ "$TRACK_CHOICE" == "1" ]; then
     # Set up .env in project root if not already present
     if [ ! -f "$PROJECT_ROOT/.env" ]; then
         cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
+        chmod 600 "$PROJECT_ROOT/.env"
         echo "Created .env from .env.example — fill in your credentials before running any tools."
         echo ""
     fi
 
     if [ "$LANG_PREF" == "node" ]; then
-        pnpm install || { echo "Root pnpm install failed."; exit 1; }
-        (cd "$PROJECT_ROOT/mcp-servers/platform/node" && pnpm install && pnpm run build) \
+        pnpm install --frozen-lockfile || { echo "Root pnpm install failed."; exit 1; }
+        (cd "$PROJECT_ROOT/mcp-servers/platform/node" && pnpm install --frozen-lockfile && pnpm run build) \
             || { echo "Platform MCP build failed."; exit 1; }
-        (cd "$PROJECT_ROOT/mcp-servers/automation/node" && pnpm install && pnpm run build) \
+        (cd "$PROJECT_ROOT/mcp-servers/automation/node" && pnpm install --frozen-lockfile && pnpm run build) \
             || { echo "Automation MCP build failed."; exit 1; }
     else
         pip install -r requirements.txt || { echo "pip install (root) failed."; exit 1; }
@@ -159,6 +160,8 @@ EOF
 EOF
             echo "MCP servers configured in: $TARGET_PATH/.mcp.json"
         elif command -v claude &>/dev/null; then
+            claude mcp remove --scope user pixelz-platform 2>/dev/null || true
+            claude mcp remove --scope user pixelz-automation 2>/dev/null || true
             claude mcp add --scope user pixelz-platform -- "$MCP_CMD" "$PLATFORM_PATH"
             claude mcp add --scope user pixelz-automation -- "$MCP_CMD" "$AUTOMATION_PATH"
             echo "MCP servers registered with Claude (scope: user)."
@@ -169,6 +172,8 @@ EOF
         fi
     elif [ "$AGENT" == "gemini" ]; then
         if command -v gemini &>/dev/null; then
+            gemini mcp remove -s user pixelz-platform 2>/dev/null || true
+            gemini mcp remove -s user pixelz-automation 2>/dev/null || true
             gemini mcp add -s user pixelz-platform "$MCP_CMD" "$PLATFORM_PATH"
             gemini mcp add -s user pixelz-automation "$MCP_CMD" "$AUTOMATION_PATH"
             echo "MCP servers registered with Gemini."
@@ -196,7 +201,7 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
             cp "$PROJECT_ROOT/.npmrc" "$TARGET_PATH/.npmrc"
             [ -f "$PROJECT_ROOT/pnpm-lock.yaml" ] && \
                 cp "$PROJECT_ROOT/pnpm-lock.yaml" "$TARGET_PATH/pnpm-lock.yaml"
-            (cd "$TARGET_PATH" && pnpm install) \
+            (cd "$TARGET_PATH" && pnpm install --frozen-lockfile) \
                 || { echo "pnpm install in local target failed."; exit 1; }
         else
             cp "$PROJECT_ROOT/requirements.txt" "$TARGET_PATH/requirements.txt"
@@ -207,6 +212,7 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
         # Set up .env in the local target (skills load dotenv from their working directory)
         if [ ! -f "$TARGET_PATH/.env" ]; then
             cp "$PROJECT_ROOT/.env.example" "$TARGET_PATH/.env"
+            chmod 600 "$TARGET_PATH/.env"
             echo "Created $TARGET_PATH/.env from .env.example — fill in your credentials before running any tools."
             echo ""
         fi
@@ -216,12 +222,13 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
         # Global install: CLI tools stay in project root; install root dependencies
         if [ ! -f "$PROJECT_ROOT/.env" ]; then
             cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
+            chmod 600 "$PROJECT_ROOT/.env"
             echo "Created .env from .env.example — fill in your credentials before running any tools."
             echo ""
         fi
 
         if [ "$LANG_PREF" == "node" ]; then
-            pnpm install || { echo "pnpm install failed."; exit 1; }
+            pnpm install --frozen-lockfile || { echo "pnpm install failed."; exit 1; }
         else
             pip install -r requirements.txt || { echo "pip install failed."; exit 1; }
         fi

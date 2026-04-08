@@ -16,6 +16,15 @@ const BASE_URL = 'https://automation-api.pixelz.com/v1';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 
+function redactSecrets(text: string): string {
+    let s = text;
+    for (const key of ['PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET']) {
+        const val = process.env[key];
+        if (val) s = s.replaceAll(val, '<REDACTED>');
+    }
+    return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
+}
+
 const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level: string, message: string, data?: any) {
     if (!logFile) return;
@@ -317,12 +326,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } else {
             errorMsg = error.message;
         }
+        errorMsg = redactSecrets(errorMsg);
         log('error', `Tool ${name} failed`, { error: errorMsg });
         return { content: [{ type: "text", text: `Error: ${errorMsg}` }], isError: true };
     }
 });
 
-export { server, getAccessToken, ensureUrlOrId, validateId };
+export { server, getAccessToken, ensureUrlOrId, validateId, redactSecrets };
 
 if (process.env.NODE_ENV !== 'test') {
     const transport = new StdioServerTransport();

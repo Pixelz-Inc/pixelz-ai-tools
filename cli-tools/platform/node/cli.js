@@ -7,6 +7,15 @@ const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 
+function redactSecrets(text) {
+    let s = String(text);
+    for (const key of ['PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL']) {
+        const val = process.env[key];
+        if (val) s = s.replaceAll(val, '<REDACTED>');
+    }
+    return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
+}
+
 const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level, message, data) {
     if (!logFile) return;
@@ -22,6 +31,16 @@ function validateId(value, name) {
 
 function filterNull(obj) {
     return Object.fromEntries(Object.entries(obj).filter(([_, v]) => v != null));
+}
+
+const STATUS_ALIASES = {
+    'new': '10', 'in production': '60', 'production finished': '70', 'delivered': '80'
+};
+
+function resolveStatus(value) {
+    if (value == null) return value;
+    const lower = String(value).toLowerCase();
+    return STATUS_ALIASES[lower] || value;
 }
 
 const getAuthParams = () => {
@@ -151,6 +170,8 @@ const commands = {
         log('info', 'list-images', options);
         if (options.page) options.page = parseInt(options.page, 10);
         if (options.imagesPerPage) options.imagesPerPage = parseInt(options.imagesPerPage, 10);
+        if (options.imageStatus) options.imageStatus = resolveStatus(options.imageStatus);
+        if (options.excludeImageStatus) options.excludeImageStatus = resolveStatus(options.excludeImageStatus);
         const res = await axios.get(`${BASE_URL}/Images`, {
             params: filterNull({ ...getAuthParams(), ...options }), timeout: REQUEST_TIMEOUT
         });
@@ -159,6 +180,7 @@ const commands = {
     },
     'count-images': async (options = {}) => {
         log('info', 'count-images', options);
+        if (options.imageStatus) options.imageStatus = resolveStatus(options.imageStatus);
         const res = await axios.get(`${BASE_URL}/Images/Count`, {
             params: filterNull({ ...getAuthParams(), ...options }), timeout: REQUEST_TIMEOUT
         });
@@ -274,8 +296,8 @@ if (commands[cmd]) {
                 await commands[cmd](...filteredArgs);
             }
         } catch (err) {
-            console.error(`[API_ERROR] ${err.message}`);
-            if (err.response) console.error(JSON.stringify(err.response.data, null, 2));
+            console.error(redactSecrets(`[API_ERROR] ${err.message}`));
+            if (err.response) console.error(redactSecrets(JSON.stringify(err.response.data, null, 2)));
             process.exit(1);
         }
     })();
@@ -291,8 +313,8 @@ Commands:
   white-glove <path|url> [opts]           Submit image for white-glove review
   stack <path|url> <templateId> [opts]    Submit image as part of a stack
   status <ticket> [customerId]            Get image processing status
-  list-images [--status X] [--fromDate]   List images with optional filters
-  count-images [--status X] [--fromDate]  Count images matching filters
+  list-images [--status X] [--fromDate]   List images (status: 10/new, 60/in production, 70/production finished, 80/delivered)
+  count-images [--status X] [--fromDate]  Count images (accepts same status names or codes)
   list-products [page] [perPage]          List product IDs with stats
   delete <ticket> [customerId]            Cancel image processing
   reject <ticket> <comment> [opts]        Request correction for delivered image

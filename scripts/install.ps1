@@ -90,7 +90,7 @@ if ($trackChoice -eq 1) {
     }
 
     if ($langPref -eq "node") {
-        pnpm install
+        pnpm install --frozen-lockfile
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Root pnpm install failed."
             Pop-Location
@@ -98,7 +98,7 @@ if ($trackChoice -eq 1) {
         }
 
         Push-Location (Join-Path $ProjectRoot "mcp-servers\platform\node")
-        pnpm install
+        pnpm install --frozen-lockfile
         pnpm run build
         $buildOk = $LASTEXITCODE
         Pop-Location
@@ -109,7 +109,7 @@ if ($trackChoice -eq 1) {
         }
 
         Push-Location (Join-Path $ProjectRoot "mcp-servers\automation\node")
-        pnpm install
+        pnpm install --frozen-lockfile
         pnpm run build
         $buildOk = $LASTEXITCODE
         Pop-Location
@@ -177,6 +177,8 @@ if ($trackChoice -eq 1) {
             $mcpConfig | ConvertTo-Json -Depth 5 | Out-File $mcpJsonFile -Encoding UTF8
             Write-Host "MCP servers configured in: $mcpJsonFile"
         } elseif (Get-Command claude -ErrorAction SilentlyContinue) {
+            claude mcp remove --scope user pixelz-platform 2>$null
+            claude mcp remove --scope user pixelz-automation 2>$null
             claude mcp add --scope user pixelz-platform -- $mcpCmd $platformPath
             claude mcp add --scope user pixelz-automation -- $mcpCmd $automationPath
             Write-Host "MCP servers registered with Claude (scope: user)."
@@ -187,6 +189,8 @@ if ($trackChoice -eq 1) {
         }
     } elseif ($agent -eq "gemini") {
         if (Get-Command gemini -ErrorAction SilentlyContinue) {
+            gemini mcp remove -s user pixelz-platform 2>$null
+            gemini mcp remove -s user pixelz-automation 2>$null
             gemini mcp add -s user pixelz-platform $mcpCmd $platformPath
             gemini mcp add -s user pixelz-automation $mcpCmd $automationPath
             Write-Host "MCP servers registered with Gemini."
@@ -218,7 +222,7 @@ if ($trackChoice -eq 1) {
                 Copy-Item $lockFile (Join-Path $targetPath "pnpm-lock.yaml") -Force
             }
             Push-Location $targetPath
-            pnpm install
+            pnpm install --frozen-lockfile
             $installOk = $LASTEXITCODE
             Pop-Location
             if ($installOk -ne 0) {
@@ -255,7 +259,7 @@ if ($trackChoice -eq 1) {
         }
 
         if ($langPref -eq "node") {
-            pnpm install
+            pnpm install --frozen-lockfile
             if ($LASTEXITCODE -ne 0) {
                 Write-Error "pnpm install failed."
                 Pop-Location

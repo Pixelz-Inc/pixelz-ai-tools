@@ -15,6 +15,15 @@ const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 
+function redactSecrets(text: string): string {
+    let s = text;
+    for (const key of ['PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL']) {
+        const val = process.env[key];
+        if (val) s = s.replaceAll(val, '<REDACTED>');
+    }
+    return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
+}
+
 const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level: string, message: string, data?: any) {
     if (!logFile) return;
@@ -167,12 +176,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "list_images",
-                description: "Search and list images in the account with optional filters. Returns ticket IDs, statuses, and dates. Use status=80 to list delivered images.",
+                description: "Search and list images in the account with optional filters. Returns ticket IDs, statuses, and dates. Status accepts codes or names: 10/new, 60/in production, 70/production finished, 80/delivered.",
                 inputSchema: {
                     type: "object",
                     properties: {
-                        imageStatus: { type: "string", description: "Filter by status code (e.g. 80 for Delivered)" },
-                        excludeImageStatus: { type: "string" },
+                        imageStatus: { type: "string", description: "Filter by status code or name (10/new, 60/in production, 70/production finished, 80/delivered)" },
+                        excludeImageStatus: { type: "string", description: "Exclude by status code or name" },
                         productId: { type: "string" },
                         fromDate: { type: "string", description: "YYYY-MM-DD" },
                         toDate: { type: "string", description: "YYYY-MM-DD" },
@@ -189,7 +198,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 inputSchema: {
                     type: "object",
                     properties: {
-                        imageStatus: { type: "string", description: "Filter by status code (e.g. 80 for Delivered)" },
+                        imageStatus: { type: "string", description: "Filter by status code or name (10/new, 60/in production, 70/production finished, 80/delivered)" },
                         fromDate: { type: "string", description: "YYYY-MM-DD" },
                         toDate: { type: "string", description: "YYYY-MM-DD" }
                     }
@@ -258,6 +267,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         ],
     };
 });
+
+// --- Status aliases (human-readable names → API numeric codes) ---
+const STATUS_ALIASES: Record<string, string> = {
+    'new': '10', 'in production': '60', 'production finished': '70', 'delivered': '80'
+};
+function resolveStatus(value: string | undefined): string | undefined {
+    if (!value) return value;
+    return STATUS_ALIASES[value.toLowerCase()] || value;
+}
 
 // --- Zod validation schemas ---
 const TemplateIdSchema = z.object({ templateId: z.string().min(1) });
@@ -396,12 +414,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
             case "list_images": {
                 const p = ListImagesSchema.parse(args);
-                response = await axios.get(`${BASE_URL}/Images`, { params: { ...auth, ...p }, timeout: REQUEST_TIMEOUT });
+                const listParams = { ...p, imageStatus: resolveStatus(p.imageStatus), excludeImageStatus: resolveStatus(p.excludeImageStatus) };
+                response = await axios.get(`${BASE_URL}/Images`, { params: { ...auth, ...listParams }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "count_images": {
                 const p = CountImagesSchema.parse(args);
-                response = await axios.get(`${BASE_URL}/Images/Count`, { params: { ...auth, ...p }, timeout: REQUEST_TIMEOUT });
+                const countParams = { ...p, imageStatus: resolveStatus(p.imageStatus) };
+                response = await axios.get(`${BASE_URL}/Images/Count`, { params: { ...auth, ...countParams }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "list_product_ids": {
@@ -456,12 +476,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } else {
             errorMsg = error.message;
         }
+        errorMsg = redactSecrets(errorMsg);
         log('error', `Tool ${name} failed`, { error: errorMsg });
         return { content: [{ type: "text", text: `Error: ${errorMsg}` }], isError: true };
     }
 });
 
-export { server, getAuthParams, checkApiError, ensureUrl, validateId, AddColorLibrarySchema };
+export { server, getAuthParams, checkApiError, ensureUrl, validateId, redactSecrets, AddColorLibrarySchema };
 
 if (process.env.NODE_ENV !== 'test') {
     const transport = new StdioServerTransport();

@@ -10,10 +10,10 @@ Pixelz AI Tools connects the Pixelz Platform and Automation APIs to AI coding as
 
 ### MCP Servers (Node.js — TypeScript)
 ```bash
-cd mcp-servers/platform/node && npm install && npm run build
-cd mcp-servers/automation/node && npm install && npm run build
+cd mcp-servers/platform/node && pnpm install && pnpm run build
+cd mcp-servers/automation/node && pnpm install && pnpm run build
 ```
-`npm run build` compiles TypeScript via `tsc` into `build/`. Start with `npm start` (runs `node build/index.js`).
+`pnpm run build` compiles TypeScript via `tsc` into `build/`. Start with `pnpm start` (runs `node build/index.js`).
 
 ### MCP Servers (Python)
 No build step — run directly via `python server.py`.
@@ -35,8 +35,8 @@ pwsh scripts/install.ps1        # Interactive Windows installer
 
 ### Tests
 ```bash
-cd tests/node && npm install && npx vitest run   # Node.js tests (Vitest)
-cd tests/python && python -m pytest              # Python tests (pytest)
+cd tests/node && pnpm install && pnpm exec vitest run   # Node.js tests (Vitest)
+cd tests/python && python -m pytest                     # Python tests (pytest)
 ```
 
 ## Architecture: Two Tracks
