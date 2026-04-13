@@ -26,14 +26,14 @@ describe('Automation Auth — getAccessToken()', () => {
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_SECRET', 'secret456');
 
         // Mock axios before importing the module so the module gets the mock
+        const mockPost = vi.fn().mockResolvedValue({
+            data: { access_token: 'token_abc', expires_in: 3600 },
+        });
+        const mockInstance = { post: mockPost, get: vi.fn(), put: vi.fn(), delete: vi.fn(), interceptors: { response: { use: vi.fn() } } };
         vi.doMock('axios', () => ({
             default: {
-                post: vi.fn().mockResolvedValue({
-                    data: { access_token: 'token_abc', expires_in: 3600 },
-                }),
-                get: vi.fn(),
-                put: vi.fn(),
-                delete: vi.fn(),
+                ...mockInstance,
+                create: vi.fn().mockReturnValue(mockInstance),
             },
         }));
 

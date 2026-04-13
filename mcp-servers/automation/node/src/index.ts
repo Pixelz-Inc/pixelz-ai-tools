@@ -15,6 +15,23 @@ const AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openi
 const BASE_URL = 'https://automation-api.pixelz.com/v1';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+const MAX_RETRIES = 3;
+const RETRY_STATUS = new Set([429, 502, 503, 504]);
+
+const axiosRetry = axios.create();
+axiosRetry.interceptors.response.use(undefined, async (error) => {
+    const config = error.config;
+    if (!config) throw error;
+    config.__retryCount = config.__retryCount || 0;
+    const status = error.response?.status;
+    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
+    config.__retryCount++;
+    const retryAfter = error.response?.headers?.['retry-after'];
+    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    await new Promise(r => setTimeout(r, delay));
+    return axiosRetry(config);
+});
 
 function redactSecrets(text: string): string {
     let s = text;
@@ -29,7 +46,7 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level: string, message: string, data?: any) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, () => {});
+    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value: string, name: string) {
@@ -39,23 +56,33 @@ function validateId(value: string, name: string) {
 }
 
 const tokenCache = { token: null as string | null, expiresAt: 0 };
+let tokenPromise: Promise<string> | null = null;
 
 async function getAccessToken() {
     if (tokenCache.token && Date.now() < tokenCache.expiresAt) {
         return tokenCache.token;
     }
-    const clientId = process.env.PIXELZ_AUTOMATION_CLIENT_ID;
-    const clientSecret = process.env.PIXELZ_AUTOMATION_CLIENT_SECRET;
-    if (!clientId || !clientSecret) throw new Error("[AUTH_ERROR] Missing PIXELZ_AUTOMATION_CLIENT_ID or PIXELZ_AUTOMATION_CLIENT_SECRET in .env");
-    const params = new URLSearchParams();
-    params.append('grant_type', 'client_credentials');
-    params.append('client_id', clientId);
-    params.append('client_secret', clientSecret);
-    log('info', 'Requesting new OAuth token');
-    const response = await axios.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
-    tokenCache.token = response.data.access_token;
-    tokenCache.expiresAt = Date.now() + ((response.data.expires_in || 3600) - 60) * 1000;
-    return tokenCache.token!;
+    if (!tokenPromise) {
+        tokenPromise = (async () => {
+            try {
+                const clientId = process.env.PIXELZ_AUTOMATION_CLIENT_ID;
+                const clientSecret = process.env.PIXELZ_AUTOMATION_CLIENT_SECRET;
+                if (!clientId || !clientSecret) throw new Error("[AUTH_ERROR] Missing PIXELZ_AUTOMATION_CLIENT_ID or PIXELZ_AUTOMATION_CLIENT_SECRET in .env");
+                const params = new URLSearchParams();
+                params.append('grant_type', 'client_credentials');
+                params.append('client_id', clientId);
+                params.append('client_secret', clientSecret);
+                log('info', 'Requesting new OAuth token');
+                const response = await axiosRetry.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
+                tokenCache.token = response.data.access_token;
+                tokenCache.expiresAt = Date.now() + ((response.data.expires_in || 3600) - 60) * 1000;
+                return tokenCache.token!;
+            } finally {
+                tokenPromise = null;
+            }
+        })();
+    }
+    return tokenPromise;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -67,16 +94,18 @@ async function ensureUrlOrId(input: string, token: string) {
     if (!input) return null;
     if (input.startsWith('http://') || input.startsWith('https://')) return input;
     if (!fs.existsSync(input)) throw new Error(`Local file not found: ${input}`);
-    const fileSize = fs.statSync(input).size;
+    const resolved = fs.realpathSync(input);
+    if (!fs.statSync(resolved).isFile()) throw new Error(`Not a regular file: ${input}`);
+    const fileSize = fs.statSync(resolved).size;
     if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
-    const fileName = path.basename(input);
+    const fileName = path.basename(resolved);
     log('info', 'Requesting upload URL', { fileName });
-    const presignRes = await axios.post(`${BASE_URL}/files/request-upload-url`, { fileName }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: REQUEST_TIMEOUT });
+    const presignRes = await axiosRetry.post(`${BASE_URL}/files/request-upload-url`, { fileName }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: REQUEST_TIMEOUT });
     const uploadUrl = presignRes.data.url;
-    const contentType = MIME_TYPES[path.extname(input).toLowerCase()] || 'application/octet-stream';
-    const fileStream = fs.createReadStream(input);
+    const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
+    const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file', { fileName, size: fileSize });
-    await axios.put(uploadUrl, fileStream, { headers: { 'Content-Type': contentType, 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
+    await axiosRetry.put(uploadUrl, fileStream, { headers: { 'Content-Type': contentType, 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
     return uploadUrl;
 }
 
@@ -243,7 +272,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             case "remove_background": {
                 const p = RemoveBgSchema.parse(args);
                 const rbUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axios.post(`${BASE_URL}/images/remove-background`, filterNull({
+                response = await axiosRetry.post(`${BASE_URL}/images/remove-background`, filterNull({
                     image_url: rbUrl,
                     background_color: p.backgroundColor,
                     transparent_background: p.transparentBackground ?? true,
@@ -256,7 +285,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             case "color_matching": {
                 const p = ColorMatchingSchema.parse(args);
                 const cmUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axios.post(`${BASE_URL}/images/color-matching`, filterNull({
+                response = await axiosRetry.post(`${BASE_URL}/images/color-matching`, filterNull({
                     image_url: cmUrl,
                     color_markers: p.colorMarkers,
                     callback_url: p.callbackUrl
@@ -266,7 +295,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             case "create_mask": {
                 const p = CreateMaskSchema.parse(args);
                 const mUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axios.post(`${BASE_URL}/images/create-mask`, filterNull({
+                response = await axiosRetry.post(`${BASE_URL}/images/create-mask`, filterNull({
                     image_url: mUrl,
                     feather_width: p.featherWidth,
                     trimap_url: p.trimapUrl,
@@ -277,7 +306,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             case "create_trimap": {
                 const p = CreateTrimapSchema.parse(args);
                 const tUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axios.post(`${BASE_URL}/images/create-trimap`, filterNull({
+                response = await axiosRetry.post(`${BASE_URL}/images/create-trimap`, filterNull({
                     image_url: tUrl,
                     callback_url: p.callbackUrl
                 }), { headers: makeHeaders(p.sync === true), timeout: REQUEST_TIMEOUT });
@@ -286,7 +315,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             case "model_crop": {
                 const p = ModelCropSchema.parse(args);
                 const mcUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axios.post(`${BASE_URL}/images/model-crop`, filterNull({
+                response = await axiosRetry.post(`${BASE_URL}/images/model-crop`, filterNull({
                     image_url: mcUrl,
                     top_crop_location: p.topCropLocation,
                     bottom_crop_location: p.bottomCropLocation,
@@ -298,12 +327,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const p = JobIdSchema.parse(args);
                 validateId(p.jobId, 'jobId');
                 const h: Record<string, string> = { 'Authorization': `Bearer ${token}` };
-                response = await axios.get(`${BASE_URL}/images/jobs/${p.jobId}/status`, { headers: h, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/images/jobs/${p.jobId}/status`, { headers: h, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "get_webhook_public_key": {
                 const h: Record<string, string> = { 'Authorization': `Bearer ${token}` };
-                response = await axios.get(`${BASE_URL}/webhook/public-keys`, { headers: h, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/webhook/public-keys`, { headers: h, timeout: REQUEST_TIMEOUT });
                 break;
             }
             default:

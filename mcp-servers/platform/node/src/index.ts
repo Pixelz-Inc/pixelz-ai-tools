@@ -14,6 +14,23 @@ dotenv.config({ path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, 
 const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+const MAX_RETRIES = 3;
+const RETRY_STATUS = new Set([429, 502, 503, 504]);
+
+const axiosRetry = axios.create();
+axiosRetry.interceptors.response.use(undefined, async (error) => {
+    const config = error.config;
+    if (!config) throw error;
+    config.__retryCount = config.__retryCount || 0;
+    const status = error.response?.status;
+    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
+    config.__retryCount++;
+    const retryAfter = error.response?.headers?.['retry-after'];
+    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    await new Promise(r => setTimeout(r, delay));
+    return axiosRetry(config);
+});
 
 function redactSecrets(text: string): string {
     let s = text;
@@ -28,7 +45,7 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level: string, message: string, data?: any) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, () => {});
+    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value: string, name: string) {
@@ -59,12 +76,14 @@ async function ensureUrl(input: string) {
     if (!input) return null;
     if (input.startsWith('http://') || input.startsWith('https://')) return input;
     if (!fs.existsSync(input)) throw new Error(`Local file not found: ${input}`);
-    const fileSize = fs.statSync(input).size;
+    const resolved = fs.realpathSync(input);
+    if (!fs.statSync(resolved).isFile()) throw new Error(`Not a regular file: ${input}`);
+    const fileSize = fs.statSync(resolved).size;
     if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
     const auth = getAuthParams();
-    const fileName = path.basename(input);
+    const fileName = path.basename(resolved);
     log('info', 'Requesting presigned URL', { fileName });
-    const presignRes = await axios.post(`${BASE_URL}/RequestPresignUrls`, { ...auth, imageNames: [fileName] }, { timeout: REQUEST_TIMEOUT });
+    const presignRes = await axiosRetry.post(`${BASE_URL}/RequestPresignUrls`, { ...auth, imageNames: [fileName] }, { timeout: REQUEST_TIMEOUT });
     const presignData = presignRes.data;
     if (presignData && !Array.isArray(presignData) && presignData.ErrorCode) {
         throw new Error(
@@ -77,9 +96,9 @@ async function ensureUrl(input: string) {
         throw new Error('Presigned URL request returned an unexpected response.');
     }
     const { UploadUrl, DownloadUrl } = presignData[0];
-    const fileStream = fs.createReadStream(input);
+    const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file to S3', { fileName, size: fileSize });
-    await axios.put(UploadUrl, fileStream, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
+    await axiosRetry.put(UploadUrl, fileStream, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
     return DownloadUrl;
 }
 
@@ -377,82 +396,82 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         log('info', `Tool called: ${name}`, args);
         switch (name) {
             case "list_templates":
-                response = await axios.get(`${BASE_URL}/Templates`, { params: auth, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/Templates`, { params: auth, timeout: REQUEST_TIMEOUT });
                 break;
             case "get_template_detail": {
                 const p = TemplateIdSchema.parse(args);
                 validateId(p.templateId, 'templateId');
-                response = await axios.get(`${BASE_URL}/Template/${p.templateId}`, { params: auth, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/Template/${p.templateId}`, { params: auth, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "upload_image": {
                 const p = UploadImageSchema.parse(args);
                 const url = await ensureUrl(p.imagePath);
                 const { imagePath: _ip, ...uploadArgs } = p;
-                response = await axios.post(`${BASE_URL}/Image`, { ...auth, ...uploadArgs, imageURL: url }, { timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.post(`${BASE_URL}/Image`, { ...auth, ...uploadArgs, imageURL: url }, { timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "white_glove_service": {
                 const p = WhiteGloveSchema.parse(args);
                 const wgUrl = await ensureUrl(p.imagePath);
                 const { imagePath: _wgip, ...wgArgs } = p;
-                response = await axios.post(`${BASE_URL}/WhiteGloveService`, { ...auth, ...wgArgs, imageURL: wgUrl }, { timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.post(`${BASE_URL}/WhiteGloveService`, { ...auth, ...wgArgs, imageURL: wgUrl }, { timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "stack_image": {
                 const p = StackImageSchema.parse(args);
                 const sUrl = await ensureUrl(p.imagePath);
                 const { imagePath: _sip, ...stackArgs } = p;
-                response = await axios.post(`${BASE_URL}/StackImage`, { ...auth, ...stackArgs, imageURL: sUrl }, { timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.post(`${BASE_URL}/StackImage`, { ...auth, ...stackArgs, imageURL: sUrl }, { timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "get_image_status": {
                 const p = ImageTicketSchema.parse(args);
                 validateId(p.imageTicket, 'imageTicket');
-                response = await axios.get(`${BASE_URL}/Image/${p.imageTicket}`, { params: { ...auth, customerImageId: p.customerImageId }, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/Image/${p.imageTicket}`, { params: { ...auth, customerImageId: p.customerImageId }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "list_images": {
                 const p = ListImagesSchema.parse(args);
                 const listParams = { ...p, imageStatus: resolveStatus(p.imageStatus), excludeImageStatus: resolveStatus(p.excludeImageStatus) };
-                response = await axios.get(`${BASE_URL}/Images`, { params: { ...auth, ...listParams }, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/Images`, { params: { ...auth, ...listParams }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "count_images": {
                 const p = CountImagesSchema.parse(args);
                 const countParams = { ...p, imageStatus: resolveStatus(p.imageStatus) };
-                response = await axios.get(`${BASE_URL}/Images/Count`, { params: { ...auth, ...countParams }, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/Images/Count`, { params: { ...auth, ...countParams }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "list_product_ids": {
                 const p = ListProductIdsSchema.parse(args);
-                response = await axios.get(`${BASE_URL}/ProductIds`, { params: { ...auth, page: p.page, productIdsPerPage: p.perPage }, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/ProductIds`, { params: { ...auth, page: p.page, productIdsPerPage: p.perPage }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "delete_image": {
                 const p = ImageTicketSchema.parse(args);
                 validateId(p.imageTicket, 'imageTicket');
-                response = await axios.delete(`${BASE_URL}/Image/${p.imageTicket}`, { data: { ...auth, ...p }, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.delete(`${BASE_URL}/Image/${p.imageTicket}`, { data: { ...auth, ...p }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "reject_image": {
                 const p = RejectImageSchema.parse(args);
                 validateId(p.imageTicket, 'imageTicket');
-                response = await axios.put(`${BASE_URL}/Image/Reject/${p.imageTicket}`, { ...auth, ...p }, { timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.put(`${BASE_URL}/Image/Reject/${p.imageTicket}`, { ...auth, ...p }, { timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "get_contact":
-                response = await axios.get(`${BASE_URL}/Contact`, { params: auth, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/Contact`, { params: auth, timeout: REQUEST_TIMEOUT });
                 break;
             case "get_invoices": {
                 const p = GetInvoicesSchema.parse(args);
-                response = await axios.get(`${BASE_URL}/Invoices`, { params: { ...auth, ...p }, timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.get(`${BASE_URL}/Invoices`, { params: { ...auth, ...p }, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "add_color_library": {
                 const p = AddColorLibrarySchema.parse(args);
                 const resolvedUrls = await Promise.all(p.imagesPath.map(img => ensureUrl(img)));
-                response = await axios.post(`${BASE_URL}/AddColorLibrary`, { ...auth, imagesUrl: resolvedUrls }, { timeout: REQUEST_TIMEOUT });
+                response = await axiosRetry.post(`${BASE_URL}/AddColorLibrary`, { ...auth, imagesUrl: resolvedUrls }, { timeout: REQUEST_TIMEOUT });
                 break;
             }
             default:

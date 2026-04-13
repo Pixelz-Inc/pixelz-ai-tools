@@ -3,6 +3,8 @@ import sys
 import json
 import re
 import requests
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 import argparse
 from dotenv import load_dotenv
 
@@ -21,6 +23,11 @@ def redact_secrets(text):
     return s
 REQUEST_TIMEOUT = 90
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True)
+_session = requests.Session()
+_session.mount('https://', HTTPAdapter(max_retries=_retry))
+_session.mount('http://', HTTPAdapter(max_retries=_retry))
 
 _log_file = os.getenv('PIXELZ_LOG_FILE')
 
@@ -70,14 +77,17 @@ def ensure_url(input_path):
         return input_path
     if not os.path.exists(input_path):
         raise Exception(f"Local file not found: {input_path}")
-    file_size = os.path.getsize(input_path)
+    resolved = os.path.realpath(input_path)
+    if not os.path.isfile(resolved):
+        raise Exception(f"Not a regular file: {input_path}")
+    file_size = os.path.getsize(resolved)
     if file_size > MAX_FILE_SIZE:
         raise Exception(f"File too large ({file_size / (1024**3):.2f} GB). Maximum allowed size is 2 GB.")
 
     auth = get_auth()
-    file_name = os.path.basename(input_path)
+    file_name = os.path.basename(resolved)
     log('info', 'Requesting presigned URL', {'fileName': file_name})
-    r = requests.post(f"{BASE_URL}/RequestPresignUrls", json={**auth, 'imageNames': [file_name]}, timeout=REQUEST_TIMEOUT)
+    r = _session.post(f"{BASE_URL}/RequestPresignUrls", json={**auth, 'imageNames': [file_name]}, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     body = r.json()
     if isinstance(body, dict) and body.get('ErrorCode'):
@@ -92,8 +102,8 @@ def ensure_url(input_path):
     download_url = body[0]['DownloadUrl']
     
     log('info', 'Uploading file to S3', {'fileName': file_name, 'size': file_size})
-    with open(input_path, 'rb') as f:
-        r_put = requests.put(upload_url, data=f, headers={'Content-Type': 'application/octet-stream'}, timeout=REQUEST_TIMEOUT)
+    with open(resolved, 'rb') as f:
+        r_put = _session.put(upload_url, data=f, headers={'Content-Type': 'application/octet-stream'}, timeout=REQUEST_TIMEOUT)
         r_put.raise_for_status()
 
     return download_url
@@ -219,82 +229,122 @@ def main():
 
         if args.command == 'list-templates':
             log('info', 'list-templates')
-            print_checked(requests.get(f"{BASE_URL}/Templates", params=auth, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.get(f"{BASE_URL}/Templates", params=auth, timeout=REQUEST_TIMEOUT))
         elif args.command == 'get-template':
             validate_id(args.id, 'templateId')
             log('info', 'get-template', {'id': args.id})
-            print_checked(requests.get(f"{BASE_URL}/Template/{args.id}", params=auth, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.get(f"{BASE_URL}/Template/{args.id}", params=auth, timeout=REQUEST_TIMEOUT))
         elif args.command == 'upload':
             log('info', 'upload', {'template': args.template})
             url = ensure_url(args.input)
-            payload = {**auth, 'imageURL': url, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command', 'input', 'template', 'colorwayIds']}}
-            payload['templateId'] = args.template
+            payload = {**auth, 'imageURL': url, 'templateId': args.template}
+            for key in ['imageURL2', 'imageURL3', 'imageURL4', 'imageURL5', 'colorReferenceFileURL',
+                        'imageCallbackURL', 'customerImageId', 'productId', 'customerFolder',
+                        'imageDeadlineDateTimeUTC', 'comment', 'markupImageUrl', 'swatchImageURL',
+                        'swatchColorCode', 'markerX', 'markerY', 'outputFileName', 'customerImageColorID']:
+                val = getattr(args, key, None)
+                if val is not None:
+                    payload[key] = val
             if args.colorwayIds:
                 payload['colorwayIds'] = json.loads(args.colorwayIds)
-            print_checked(requests.post(f"{BASE_URL}/Image", json=payload, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.post(f"{BASE_URL}/Image", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'white-glove':
             log('info', 'white-glove')
             url = ensure_url(args.input)
-            payload = {**auth, 'imageURL': url, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command', 'input']}}
-            print_checked(requests.post(f"{BASE_URL}/WhiteGloveService", json=payload, timeout=REQUEST_TIMEOUT))
+            payload = {**auth, 'imageURL': url}
+            for key in ['imageURL2', 'imageURL3', 'imageURL4', 'imageURL5', 'comment', 'markupImageUrl',
+                        'colorReferenceFileURL', 'imageCallbackURL', 'customerImageId', 'productId', 'customerFolder']:
+                val = getattr(args, key, None)
+                if val is not None:
+                    payload[key] = val
+            print_checked(_session.post(f"{BASE_URL}/WhiteGloveService", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'stack':
             log('info', 'stack')
             url = ensure_url(args.input)
-            payload = {**auth, 'imageURL': url, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command', 'input', 'template']}}
+            payload = {**auth, 'imageURL': url}
             if args.template: payload['templateId'] = args.template
-            print_checked(requests.post(f"{BASE_URL}/StackImage", json=payload, timeout=REQUEST_TIMEOUT))
+            for key in ['imageURL2', 'imageURL3', 'imageURL4', 'imageURL5', 'colorReferenceFileURL',
+                        'imageCallbackURL', 'customerImageId', 'productId', 'customerFolder', 'imageDeadlineDateTimeUTC']:
+                val = getattr(args, key, None)
+                if val is not None:
+                    payload[key] = val
+            print_checked(_session.post(f"{BASE_URL}/StackImage", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'status':
             validate_id(args.ticket, 'imageTicket')
             log('info', 'status', {'ticket': args.ticket})
             params = {**auth}
             if args.customer_id: params['customerImageId'] = args.customer_id
-            print_checked(requests.get(f"{BASE_URL}/Image/{args.ticket}", params=params, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.get(f"{BASE_URL}/Image/{args.ticket}", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'list-images':
             log('info', 'list-images')
-            if args.status: args.status = resolve_status(args.status)
-            if args.excludeImageStatus: args.excludeImageStatus = resolve_status(args.excludeImageStatus)
-            params = {**auth, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command']}}
-            print_checked(requests.get(f"{BASE_URL}/Images", params=params, timeout=REQUEST_TIMEOUT))
+            params = {**auth}
+            if args.status: params['status'] = resolve_status(args.status)
+            if args.excludeImageStatus: params['excludeImageStatus'] = resolve_status(args.excludeImageStatus)
+            for key in ['productId', 'fromDate', 'toDate', 'page', 'imagesPerPage', 'sortBy', 'isDescending']:
+                val = getattr(args, key, None)
+                if val is not None:
+                    params[key] = val
+            print_checked(_session.get(f"{BASE_URL}/Images", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'count-images':
             log('info', 'count-images')
-            if args.status: args.status = resolve_status(args.status)
-            params = {**auth, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command']}}
-            print_checked(requests.get(f"{BASE_URL}/Images/Count", params=params, timeout=REQUEST_TIMEOUT))
+            params = {**auth}
+            if args.status: params['status'] = resolve_status(args.status)
+            for key in ['fromDate', 'toDate']:
+                val = getattr(args, key, None)
+                if val is not None:
+                    params[key] = val
+            print_checked(_session.get(f"{BASE_URL}/Images/Count", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'list-products':
             log('info', 'list-products')
             params = {k: v for k, v in {**auth, 'page': args.page, 'productIdsPerPage': args.per_page}.items() if v is not None}
-            print_checked(requests.get(f"{BASE_URL}/ProductIds", params=params, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.get(f"{BASE_URL}/ProductIds", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'delete':
             validate_id(args.ticket, 'imageTicket')
             log('info', 'delete', {'ticket': args.ticket})
             payload = {**auth}
             if args.customer_id: payload['customerImageId'] = args.customer_id
-            print_checked(requests.delete(f"{BASE_URL}/Image/{args.ticket}", json=payload, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.delete(f"{BASE_URL}/Image/{args.ticket}", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'reject':
             validate_id(args.ticket, 'imageTicket')
             log('info', 'reject', {'ticket': args.ticket})
             payload = {**auth, 'comment': args.comment}
             if args.customer_id: payload['customerImageId'] = args.customer_id
             if args.markupImageUrl: payload['markupImageUrl'] = args.markupImageUrl
-            print_checked(requests.put(f"{BASE_URL}/Image/Reject/{args.ticket}", json=payload, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.put(f"{BASE_URL}/Image/Reject/{args.ticket}", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'get-contact':
             log('info', 'get-contact')
-            print_checked(requests.get(f"{BASE_URL}/Contact", params=auth, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.get(f"{BASE_URL}/Contact", params=auth, timeout=REQUEST_TIMEOUT))
         elif args.command == 'add-color-library':
             log('info', 'add-color-library', {'count': len(args.images)})
             resolved_urls = [ensure_url(p) for p in args.images]
             payload = {**auth, 'imagesUrl': resolved_urls}
-            print_checked(requests.post(f"{BASE_URL}/AddColorLibrary", json=payload, timeout=REQUEST_TIMEOUT))
+            print_checked(_session.post(f"{BASE_URL}/AddColorLibrary", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'get-invoices':
             log('info', 'get-invoices')
-            params = {**auth, **{k: v for k, v in vars(args).items() if v is not None and k not in ['command']}}
-            print_checked(requests.get(f"{BASE_URL}/Invoices", params=params, timeout=REQUEST_TIMEOUT))
+            params = {**auth}
+            for key in ['fromDate', 'toDate', 'page', 'returnUrl']:
+                val = getattr(args, key, None)
+                if val is not None:
+                    params[key] = val
+            print_checked(_session.get(f"{BASE_URL}/Invoices", params=params, timeout=REQUEST_TIMEOUT))
 
+    except requests.exceptions.Timeout:
+        log('error', f'{args.command} failed', {'error': 'timeout'})
+        print("[TIMEOUT] Request timed out", file=sys.stderr)
+    except requests.exceptions.ConnectionError as e:
+        log('error', f'{args.command} failed', {'error': str(e)})
+        print(redact_secrets(f"[NETWORK_ERROR] {e}"), file=sys.stderr)
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else '?'
+        log('error', f'{args.command} failed', {'error': f'HTTP {status}'})
+        try:
+            body = e.response.json()
+            print(redact_secrets(f"[HTTP_{status}] {json.dumps(body, indent=2)}"), file=sys.stderr)
+        except Exception:
+            print(redact_secrets(f"[HTTP_{status}] {e.response.text}"), file=sys.stderr)
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
-        print(redact_secrets(f"[API_ERROR] {str(e)}"), file=sys.stderr)
-        if hasattr(e, 'response') and e.response is not None:
-            print(redact_secrets(e.response.text), file=sys.stderr)
+        print(redact_secrets(f"[API_ERROR] {e}"), file=sys.stderr)
 
 if __name__ == "__main__":
     main()

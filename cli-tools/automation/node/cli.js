@@ -7,6 +7,23 @@ const AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openi
 const BASE_URL = 'https://automation-api.pixelz.com/v1';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+const MAX_RETRIES = 3;
+const RETRY_STATUS = new Set([429, 502, 503, 504]);
+
+const axiosRetry = axios.create();
+axiosRetry.interceptors.response.use(undefined, async (error) => {
+    const config = error.config;
+    if (!config) throw error;
+    config.__retryCount = config.__retryCount || 0;
+    const status = error.response?.status;
+    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
+    config.__retryCount++;
+    const retryAfter = error.response?.headers?.['retry-after'];
+    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    await new Promise(r => setTimeout(r, delay));
+    return axiosRetry(config);
+});
 
 function redactSecrets(text) {
     let s = String(text);
@@ -21,7 +38,7 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level, message, data) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, () => {});
+    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value, name) {
@@ -35,29 +52,39 @@ function filterNull(obj) {
 }
 
 const tokenCache = { token: null, expiresAt: 0 };
+let tokenPromise = null;
 
 async function getAccessToken() {
     if (tokenCache.token && Date.now() < tokenCache.expiresAt) {
         return tokenCache.token;
     }
-    const clientId = process.env.PIXELZ_AUTOMATION_CLIENT_ID;
-    const clientSecret = process.env.PIXELZ_AUTOMATION_CLIENT_SECRET;
+    if (!tokenPromise) {
+        tokenPromise = (async () => {
+            try {
+                const clientId = process.env.PIXELZ_AUTOMATION_CLIENT_ID;
+                const clientSecret = process.env.PIXELZ_AUTOMATION_CLIENT_SECRET;
 
-    if (!clientId || !clientSecret) {
-        console.error(`[AUTH_ERROR] Missing Automation API credentials.
+                if (!clientId || !clientSecret) {
+                    console.error(`[AUTH_ERROR] Missing Automation API credentials.
 Required: PIXELZ_AUTOMATION_CLIENT_ID and PIXELZ_AUTOMATION_CLIENT_SECRET in .env file.`);
-        process.exit(1);
-    }
+                    process.exit(1);
+                }
 
-    const params = new URLSearchParams();
-    params.append('grant_type', 'client_credentials');
-    params.append('client_id', clientId);
-    params.append('client_secret', clientSecret);
-    log('info', 'Requesting new OAuth token');
-    const res = await axios.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
-    tokenCache.token = res.data.access_token;
-    tokenCache.expiresAt = Date.now() + ((res.data.expires_in || 3600) - 60) * 1000;
-    return tokenCache.token;
+                const params = new URLSearchParams();
+                params.append('grant_type', 'client_credentials');
+                params.append('client_id', clientId);
+                params.append('client_secret', clientSecret);
+                log('info', 'Requesting new OAuth token');
+                const res = await axiosRetry.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
+                tokenCache.token = res.data.access_token;
+                tokenCache.expiresAt = Date.now() + ((res.data.expires_in || 3600) - 60) * 1000;
+                return tokenCache.token;
+            } finally {
+                tokenPromise = null;
+            }
+        })();
+    }
+    return tokenPromise;
 }
 
 const MIME_TYPES = {
@@ -69,18 +96,20 @@ async function ensureUrlOrId(input, token) {
     if (!input) return null;
     if (input.startsWith('http://') || input.startsWith('https://')) return input;
     if (!fs.existsSync(input)) throw new Error(`Local file not found: ${input}`);
-    const fileSize = fs.statSync(input).size;
+    const resolved = fs.realpathSync(input);
+    if (!fs.statSync(resolved).isFile()) throw new Error(`Not a regular file: ${input}`);
+    const fileSize = fs.statSync(resolved).size;
     if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
-    const fileName = path.basename(input);
+    const fileName = path.basename(resolved);
     log('info', 'Requesting upload URL', { fileName });
-    const presignRes = await axios.post(`${BASE_URL}/files/request-upload-url`, { fileName }, {
+    const presignRes = await axiosRetry.post(`${BASE_URL}/files/request-upload-url`, { fileName }, {
         headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
     });
     const uploadUrl = presignRes.data.url;
-    const contentType = MIME_TYPES[path.extname(input).toLowerCase()] || 'application/octet-stream';
-    const fileStream = fs.createReadStream(input);
+    const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
+    const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file', { fileName, size: fileSize });
-    await axios.put(uploadUrl, fileStream, { headers: { 'Content-Type': contentType, 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
+    await axiosRetry.put(uploadUrl, fileStream, { headers: { 'Content-Type': contentType, 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
     return uploadUrl;
 }
 
@@ -103,7 +132,7 @@ const commands = {
             trimap_url: options.trimap,
             callback_url: options.callback
         });
-        const res = await axios.post(`${BASE_URL}/images/remove-background`, payload, {
+        const res = await axiosRetry.post(`${BASE_URL}/images/remove-background`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -117,7 +146,7 @@ const commands = {
             color_markers: JSON.parse(markersJson),
             callback_url: options.callback
         });
-        const res = await axios.post(`${BASE_URL}/images/color-matching`, payload, {
+        const res = await axiosRetry.post(`${BASE_URL}/images/color-matching`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -132,7 +161,7 @@ const commands = {
             trimap_url: options.trimap,
             callback_url: options.callback
         });
-        const res = await axios.post(`${BASE_URL}/images/create-mask`, payload, {
+        const res = await axiosRetry.post(`${BASE_URL}/images/create-mask`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -145,7 +174,7 @@ const commands = {
             image_url: urlOrId,
             callback_url: options.callback
         });
-        const res = await axios.post(`${BASE_URL}/images/create-trimap`, payload, {
+        const res = await axiosRetry.post(`${BASE_URL}/images/create-trimap`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -160,7 +189,7 @@ const commands = {
             bottom_crop_location: options.bottom,
             callback_url: options.callback
         });
-        const res = await axios.post(`${BASE_URL}/images/model-crop`, payload, {
+        const res = await axiosRetry.post(`${BASE_URL}/images/model-crop`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -169,7 +198,7 @@ const commands = {
         validateId(jobId, 'jobId');
         log('info', 'status', { jobId });
         const token = await getAccessToken();
-        const res = await axios.get(`${BASE_URL}/images/jobs/${jobId}/status`, {
+        const res = await axiosRetry.get(`${BASE_URL}/images/jobs/${jobId}/status`, {
             headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -177,7 +206,7 @@ const commands = {
     'get-key': async () => {
         log('info', 'get-key');
         const token = await getAccessToken();
-        const res = await axios.get(`${BASE_URL}/webhook/public-keys`, {
+        const res = await axiosRetry.get(`${BASE_URL}/webhook/public-keys`, {
             headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -225,8 +254,17 @@ if (commands[cmd]) {
                 await commands[cmd](filteredArgs[0], options);
             }
         } catch (err) {
-            console.error(redactSecrets(`[API_ERROR] ${err.message}`));
-            if (err.response) console.error(redactSecrets(JSON.stringify(err.response.data, null, 2)));
+            if (err.response) {
+                const status = err.response.status;
+                const data = err.response.data;
+                console.error(redactSecrets(`[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data, null, 2) : data}`));
+            } else if (err.code === 'ECONNABORTED') {
+                console.error(`[TIMEOUT] Request timed out`);
+            } else if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+                console.error(redactSecrets(`[NETWORK_ERROR] ${err.message}`));
+            } else {
+                console.error(redactSecrets(`[API_ERROR] ${err.message}`));
+            }
             process.exit(1);
         }
     })();

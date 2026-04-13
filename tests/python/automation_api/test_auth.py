@@ -27,6 +27,6 @@ def test_get_token_returns_access_token():
     mock_response.json.return_value = {'access_token': 'token_abc', 'expires_in': 3600}
     mock_response.raise_for_status = MagicMock()
 
-    with patch.object(mod.requests, 'post', return_value=mock_response):
+    with patch.object(mod._session, 'post', return_value=mock_response):
         token = mod.get_token()
         assert token == 'token_abc'

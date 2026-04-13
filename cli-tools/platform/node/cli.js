@@ -6,6 +6,23 @@ require('dotenv').config({ path: process.env.PIXELZ_DOTENV_PATH || path.resolve(
 const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
+const MAX_RETRIES = 3;
+const RETRY_STATUS = new Set([429, 502, 503, 504]);
+
+const axiosRetry = axios.create();
+axiosRetry.interceptors.response.use(undefined, async (error) => {
+    const config = error.config;
+    if (!config) throw error;
+    config.__retryCount = config.__retryCount || 0;
+    const status = error.response?.status;
+    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
+    config.__retryCount++;
+    const retryAfter = error.response?.headers?.['retry-after'];
+    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    await new Promise(r => setTimeout(r, delay));
+    return axiosRetry(config);
+});
 
 function redactSecrets(text) {
     let s = String(text);
@@ -20,7 +37,7 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level, message, data) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, () => {});
+    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value, name) {
@@ -72,12 +89,14 @@ async function ensureUrl(input) {
     if (!fs.existsSync(input)) {
         throw new Error(`Local file not found: ${input}`);
     }
-    const fileSize = fs.statSync(input).size;
+    const resolved = fs.realpathSync(input);
+    if (!fs.statSync(resolved).isFile()) throw new Error(`Not a regular file: ${input}`);
+    const fileSize = fs.statSync(resolved).size;
     if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
     const auth = getAuthParams();
-    const fileName = path.basename(input);
+    const fileName = path.basename(resolved);
     log('info', 'Requesting presigned URL', { fileName });
-    const presignRes = await axios.post(`${BASE_URL}/RequestPresignUrls`, {
+    const presignRes = await axiosRetry.post(`${BASE_URL}/RequestPresignUrls`, {
         ...auth,
         imageNames: [fileName]
     }, { timeout: REQUEST_TIMEOUT });
@@ -93,9 +112,9 @@ async function ensureUrl(input) {
         throw new Error('Presigned URL request returned an unexpected response.');
     }
     const { UploadUrl, DownloadUrl } = presignData[0];
-    const fileStream = fs.createReadStream(input);
+    const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file to S3', { fileName, size: fileSize });
-    await axios.put(UploadUrl, fileStream, {
+    await axiosRetry.put(UploadUrl, fileStream, {
         headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(fileSize) },
         timeout: REQUEST_TIMEOUT,
         maxContentLength: Infinity,
@@ -107,14 +126,14 @@ async function ensureUrl(input) {
 const commands = {
     'list-templates': async () => {
         log('info', 'list-templates');
-        const res = await axios.get(`${BASE_URL}/Templates`, { params: getAuthParams(), timeout: REQUEST_TIMEOUT });
+        const res = await axiosRetry.get(`${BASE_URL}/Templates`, { params: getAuthParams(), timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
     'get-template': async (id) => {
         validateId(id, 'templateId');
         log('info', 'get-template', { id });
-        const res = await axios.get(`${BASE_URL}/Template/${id}`, { params: getAuthParams(), timeout: REQUEST_TIMEOUT });
+        const res = await axiosRetry.get(`${BASE_URL}/Template/${id}`, { params: getAuthParams(), timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
@@ -127,7 +146,7 @@ const commands = {
             templateId,
             ...options
         });
-        const res = await axios.post(`${BASE_URL}/Image`, payload, { timeout: REQUEST_TIMEOUT });
+        const res = await axiosRetry.post(`${BASE_URL}/Image`, payload, { timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
@@ -139,7 +158,7 @@ const commands = {
             imageURL: url,
             ...options
         });
-        const res = await axios.post(`${BASE_URL}/WhiteGloveService`, payload, { timeout: REQUEST_TIMEOUT });
+        const res = await axiosRetry.post(`${BASE_URL}/WhiteGloveService`, payload, { timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
@@ -152,7 +171,7 @@ const commands = {
             templateId,
             ...options
         });
-        const res = await axios.post(`${BASE_URL}/StackImage`, payload, { timeout: REQUEST_TIMEOUT });
+        const res = await axiosRetry.post(`${BASE_URL}/StackImage`, payload, { timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
@@ -160,7 +179,7 @@ const commands = {
         validateId(ticket, 'imageTicket');
         log('info', 'status', { ticket });
         const params = filterNull({ ...getAuthParams(), customerImageId: customerId });
-        const res = await axios.get(`${BASE_URL}/Image/${ticket}`, {
+        const res = await axiosRetry.get(`${BASE_URL}/Image/${ticket}`, {
             params, timeout: REQUEST_TIMEOUT
         });
         checkApiError(res.data);
@@ -172,7 +191,7 @@ const commands = {
         if (options.imagesPerPage) options.imagesPerPage = parseInt(options.imagesPerPage, 10);
         if (options.imageStatus) options.imageStatus = resolveStatus(options.imageStatus);
         if (options.excludeImageStatus) options.excludeImageStatus = resolveStatus(options.excludeImageStatus);
-        const res = await axios.get(`${BASE_URL}/Images`, {
+        const res = await axiosRetry.get(`${BASE_URL}/Images`, {
             params: filterNull({ ...getAuthParams(), ...options }), timeout: REQUEST_TIMEOUT
         });
         checkApiError(res.data);
@@ -181,7 +200,7 @@ const commands = {
     'count-images': async (options = {}) => {
         log('info', 'count-images', options);
         if (options.imageStatus) options.imageStatus = resolveStatus(options.imageStatus);
-        const res = await axios.get(`${BASE_URL}/Images/Count`, {
+        const res = await axiosRetry.get(`${BASE_URL}/Images/Count`, {
             params: filterNull({ ...getAuthParams(), ...options }), timeout: REQUEST_TIMEOUT
         });
         checkApiError(res.data);
@@ -189,7 +208,7 @@ const commands = {
     },
     'list-products': async (page, perPage) => {
         log('info', 'list-products', { page, perPage });
-        const res = await axios.get(`${BASE_URL}/ProductIds`, {
+        const res = await axiosRetry.get(`${BASE_URL}/ProductIds`, {
             params: filterNull({ ...getAuthParams(), page: page ? parseInt(page, 10) : undefined, productIdsPerPage: perPage ? parseInt(perPage, 10) : undefined }),
             timeout: REQUEST_TIMEOUT
         });
@@ -199,7 +218,7 @@ const commands = {
     'delete': async (ticket, customerId) => {
         validateId(ticket, 'imageTicket');
         log('info', 'delete', { ticket });
-        const res = await axios.delete(`${BASE_URL}/Image/${ticket}`, {
+        const res = await axiosRetry.delete(`${BASE_URL}/Image/${ticket}`, {
             data: filterNull({ ...getAuthParams(), customerImageId: customerId }),
             timeout: REQUEST_TIMEOUT
         });
@@ -209,7 +228,7 @@ const commands = {
     'reject': async (ticket, comment, options = {}) => {
         validateId(ticket, 'imageTicket');
         log('info', 'reject', { ticket });
-        const res = await axios.put(`${BASE_URL}/Image/Reject/${ticket}`, filterNull({
+        const res = await axiosRetry.put(`${BASE_URL}/Image/Reject/${ticket}`, filterNull({
             ...getAuthParams(),
             comment,
             ...options
@@ -219,14 +238,14 @@ const commands = {
     },
     'get-contact': async () => {
         log('info', 'get-contact');
-        const res = await axios.get(`${BASE_URL}/Contact`, { params: getAuthParams(), timeout: REQUEST_TIMEOUT });
+        const res = await axiosRetry.get(`${BASE_URL}/Contact`, { params: getAuthParams(), timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
     'get-invoices': async (options = {}) => {
         log('info', 'get-invoices', options);
         if (options.page) options.page = parseInt(options.page, 10);
-        const res = await axios.get(`${BASE_URL}/Invoices`, {
+        const res = await axiosRetry.get(`${BASE_URL}/Invoices`, {
             params: filterNull({ ...getAuthParams(), ...options }), timeout: REQUEST_TIMEOUT
         });
         checkApiError(res.data);
@@ -240,7 +259,7 @@ const commands = {
         }
         const resolvedUrls = await Promise.all(imagePaths.map(p => ensureUrl(p)));
         const payload = { ...getAuthParams(), imagesUrl: resolvedUrls };
-        const res = await axios.post(`${BASE_URL}/AddColorLibrary`, payload, { timeout: REQUEST_TIMEOUT });
+        const res = await axiosRetry.post(`${BASE_URL}/AddColorLibrary`, payload, { timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     }
@@ -296,8 +315,17 @@ if (commands[cmd]) {
                 await commands[cmd](...filteredArgs);
             }
         } catch (err) {
-            console.error(redactSecrets(`[API_ERROR] ${err.message}`));
-            if (err.response) console.error(redactSecrets(JSON.stringify(err.response.data, null, 2)));
+            if (err.response) {
+                const status = err.response.status;
+                const data = err.response.data;
+                console.error(redactSecrets(`[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data, null, 2) : data}`));
+            } else if (err.code === 'ECONNABORTED') {
+                console.error(`[TIMEOUT] Request timed out`);
+            } else if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+                console.error(redactSecrets(`[NETWORK_ERROR] ${err.message}`));
+            } else {
+                console.error(redactSecrets(`[API_ERROR] ${err.message}`));
+            }
             process.exit(1);
         }
     })();

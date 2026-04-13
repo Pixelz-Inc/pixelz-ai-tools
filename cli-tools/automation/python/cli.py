@@ -3,8 +3,11 @@ import sys
 import json
 import re
 import time
+import threading
 import mimetypes
 import requests
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 import argparse
 from dotenv import load_dotenv
 
@@ -25,6 +28,11 @@ BASE_URL = 'https://automation-api.pixelz.com/v1'
 REQUEST_TIMEOUT = 90
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True)
+_session = requests.Session()
+_session.mount('https://', HTTPAdapter(max_retries=_retry))
+_session.mount('http://', HTTPAdapter(max_retries=_retry))
+
 _log_file = os.getenv('PIXELZ_LOG_FILE')
 
 def log(level, message, data=None):
@@ -42,24 +50,28 @@ def validate_id(value, name):
         raise ValueError(f"Invalid {name}: contains unexpected characters")
 
 _token_cache = {'token': None, 'expires_at': 0}
+_token_lock = threading.Lock()
 
 def get_token():
     if _token_cache['token'] and time.time() < _token_cache['expires_at']:
         return _token_cache['token']
-    cid = os.getenv('PIXELZ_AUTOMATION_CLIENT_ID')
-    sec = os.getenv('PIXELZ_AUTOMATION_CLIENT_SECRET')
-    if not cid or not sec:
-        print("[AUTH_ERROR] Missing Automation API credentials.")
-        print("Required: PIXELZ_AUTOMATION_CLIENT_ID and PIXELZ_AUTOMATION_CLIENT_SECRET in .env file.")
-        sys.exit(1)
+    with _token_lock:
+        if _token_cache['token'] and time.time() < _token_cache['expires_at']:
+            return _token_cache['token']
+        cid = os.getenv('PIXELZ_AUTOMATION_CLIENT_ID')
+        sec = os.getenv('PIXELZ_AUTOMATION_CLIENT_SECRET')
+        if not cid or not sec:
+            print("[AUTH_ERROR] Missing Automation API credentials.")
+            print("Required: PIXELZ_AUTOMATION_CLIENT_ID and PIXELZ_AUTOMATION_CLIENT_SECRET in .env file.")
+            sys.exit(1)
 
-    log('info', 'Requesting new OAuth token')
-    r = requests.post(AUTH_URL, data={'grant_type': 'client_credentials', 'client_id': cid, 'client_secret': sec}, timeout=REQUEST_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-    _token_cache['token'] = data['access_token']
-    _token_cache['expires_at'] = time.time() + (data.get('expires_in', 3600) - 60)
-    return _token_cache['token']
+        log('info', 'Requesting new OAuth token')
+        r = _session.post(AUTH_URL, data={'grant_type': 'client_credentials', 'client_id': cid, 'client_secret': sec}, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        _token_cache['token'] = data['access_token']
+        _token_cache['expires_at'] = time.time() + (data.get('expires_in', 3600) - 60)
+        return _token_cache['token']
 
 def ensure_url_or_id(input_path, token):
     if not input_path:
@@ -68,19 +80,22 @@ def ensure_url_or_id(input_path, token):
         return input_path
     if not os.path.exists(input_path):
         raise Exception(f"Local file not found: {input_path}")
-    file_size = os.path.getsize(input_path)
+    resolved = os.path.realpath(input_path)
+    if not os.path.isfile(resolved):
+        raise Exception(f"Not a regular file: {input_path}")
+    file_size = os.path.getsize(resolved)
     if file_size > MAX_FILE_SIZE:
         raise Exception(f"File too large ({file_size / (1024**3):.2f} GB). Maximum allowed size is 2 GB.")
     headers = {'Authorization': f'Bearer {token}'}
-    file_name = os.path.basename(input_path)
+    file_name = os.path.basename(resolved)
     log('info', 'Requesting upload URL', {'fileName': file_name})
-    r = requests.post(f"{BASE_URL}/files/request-upload-url", json={'fileName': file_name}, headers=headers, timeout=REQUEST_TIMEOUT)
+    r = _session.post(f"{BASE_URL}/files/request-upload-url", json={'fileName': file_name}, headers=headers, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     upload_url = r.json()['url']
-    content_type = mimetypes.guess_type(input_path)[0] or 'application/octet-stream'
+    content_type = mimetypes.guess_type(resolved)[0] or 'application/octet-stream'
     log('info', 'Uploading file', {'fileName': file_name, 'size': file_size})
-    with open(input_path, 'rb') as f:
-        r_put = requests.put(upload_url, data=f, headers={'Content-Type': content_type}, timeout=REQUEST_TIMEOUT)
+    with open(resolved, 'rb') as f:
+        r_put = _session.put(upload_url, data=f, headers={'Content-Type': content_type}, timeout=REQUEST_TIMEOUT)
         r_put.raise_for_status()
     return upload_url
 
@@ -153,7 +168,7 @@ def main():
                 'callback_url': args.callback
             }
             payload = {k: v for k, v in payload.items() if v is not None}
-            r = requests.post(f"{BASE_URL}/images/remove-background", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
+            r = _session.post(f"{BASE_URL}/images/remove-background", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         elif args.command == 'color-match':
@@ -165,7 +180,7 @@ def main():
                 'callback_url': args.callback if hasattr(args, 'callback') else None
             }
             payload = {k: v for k, v in payload.items() if v is not None}
-            r = requests.post(f"{BASE_URL}/images/color-matching", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
+            r = _session.post(f"{BASE_URL}/images/color-matching", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         elif args.command == 'create-mask':
@@ -178,7 +193,7 @@ def main():
                 'callback_url': args.callback
             }
             payload = {k: v for k, v in payload.items() if v is not None}
-            r = requests.post(f"{BASE_URL}/images/create-mask", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
+            r = _session.post(f"{BASE_URL}/images/create-mask", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         elif args.command == 'create-trimap':
@@ -189,7 +204,7 @@ def main():
                 'callback_url': args.callback
             }
             payload = {k: v for k, v in payload.items() if v is not None}
-            r = requests.post(f"{BASE_URL}/images/create-trimap", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
+            r = _session.post(f"{BASE_URL}/images/create-trimap", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         elif args.command == 'model-crop':
@@ -202,26 +217,38 @@ def main():
                 'callback_url': args.callback
             }
             payload = {k: v for k, v in payload.items() if v is not None}
-            r = requests.post(f"{BASE_URL}/images/model-crop", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
+            r = _session.post(f"{BASE_URL}/images/model-crop", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         elif args.command == 'status':
             validate_id(args.job_id, 'jobId')
             log('info', 'status', {'jobId': args.job_id})
-            r = requests.get(f"{BASE_URL}/images/jobs/{args.job_id}/status", headers=make_headers(sync=True), timeout=REQUEST_TIMEOUT)
+            r = _session.get(f"{BASE_URL}/images/jobs/{args.job_id}/status", headers=make_headers(sync=True), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         elif args.command == 'get-key':
             log('info', 'get-key')
-            r = requests.get(f"{BASE_URL}/webhook/public-keys", headers=make_headers(sync=True), timeout=REQUEST_TIMEOUT)
+            r = _session.get(f"{BASE_URL}/webhook/public-keys", headers=make_headers(sync=True), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
 
+    except requests.exceptions.Timeout:
+        log('error', f'{args.command} failed', {'error': 'timeout'})
+        print("[TIMEOUT] Request timed out", file=sys.stderr)
+    except requests.exceptions.ConnectionError as e:
+        log('error', f'{args.command} failed', {'error': str(e)})
+        print(redact_secrets(f"[NETWORK_ERROR] {e}"), file=sys.stderr)
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else '?'
+        log('error', f'{args.command} failed', {'error': f'HTTP {status}'})
+        try:
+            body = e.response.json()
+            print(redact_secrets(f"[HTTP_{status}] {json.dumps(body, indent=2)}"), file=sys.stderr)
+        except Exception:
+            print(redact_secrets(f"[HTTP_{status}] {e.response.text}"), file=sys.stderr)
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
-        print(redact_secrets(f"[API_ERROR] {str(e)}"), file=sys.stderr)
-        if hasattr(e, 'response') and e.response is not None:
-            print(redact_secrets(e.response.text), file=sys.stderr)
+        print(redact_secrets(f"[API_ERROR] {e}"), file=sys.stderr)
 
 if __name__ == "__main__":
     main()

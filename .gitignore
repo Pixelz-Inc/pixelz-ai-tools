@@ -5,6 +5,9 @@ node_modules/
 build/
 dist/
 
+# Generated output
+graphify-out/
+
 # Python cache
 __pycache__/
 *.pyc
