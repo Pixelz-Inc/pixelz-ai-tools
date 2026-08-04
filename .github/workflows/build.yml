@@ -71,6 +71,10 @@ jobs:
           python-version: '3.12'
       - name: Install Python CLI dependencies
         run: pip install -r requirements.txt
+      # cli-tools/*/node/cli.js resolves axios and dotenv from the repo root, so the
+      # root install is required before any test that spawns a CLI.
+      - name: Install root CLI dependencies
+        run: pnpm install --frozen-lockfile
       - name: Install MCP server dependencies
         run: |
           cd mcp-servers/platform/node && pnpm install --frozen-lockfile
