@@ -5,7 +5,8 @@ const fs = require('fs');
 // corrupts the CLI's JSON output.
 require('dotenv').config({ quiet: true, path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../.env') });
 
-const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
+// Overridable so tests can point at a local stub and assert the exact outgoing params.
+const BASE_URL = process.env.PIXELZ_PLATFORM_BASE_URL || 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 const MAX_RETRIES = 3;
@@ -60,6 +61,18 @@ function resolveStatus(value) {
     if (value == null) return value;
     const lower = String(value).toLowerCase();
     return STATUS_ALIASES[lower] || value;
+}
+
+// The Platform API names these params `imageStatus` / `customerImageId`, but the
+// documented CLI flags are the shorter `--status` / `--customer-id`. Accept the API
+// spelling too so either form works, and always emit the API's name.
+function pickStatus(options, key = 'status') {
+    const apiKey = key === 'status' ? 'imageStatus' : key;
+    return resolveStatus(options[key] ?? options[apiKey]);
+}
+
+function pickCustomerId(options) {
+    return options['customer-id'] ?? options.customerImageId;
 }
 
 const getAuthParams = () => {
@@ -177,10 +190,10 @@ const commands = {
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'status': async (ticket, customerId) => {
+    'status': async (ticket, options = {}) => {
         validateId(ticket, 'imageTicket');
         log('info', 'status', { ticket });
-        const params = filterNull({ ...getAuthParams(), customerImageId: customerId });
+        const params = filterNull({ ...getAuthParams(), customerImageId: pickCustomerId(options) });
         const res = await axiosRetry.get(`${BASE_URL}/Image/${ticket}`, {
             params, timeout: REQUEST_TIMEOUT
         });
@@ -189,26 +202,33 @@ const commands = {
     },
     'list-images': async (options = {}) => {
         log('info', 'list-images', options);
-        if (options.page) options.page = parseInt(options.page, 10);
-        if (options.imagesPerPage) options.imagesPerPage = parseInt(options.imagesPerPage, 10);
-        if (options.imageStatus) options.imageStatus = resolveStatus(options.imageStatus);
-        if (options.excludeImageStatus) options.excludeImageStatus = resolveStatus(options.excludeImageStatus);
+        const { status: _s, imageStatus: _is, excludeImageStatus: _es, ...rest } = options;
+        if (rest.page) rest.page = parseInt(rest.page, 10);
+        if (rest.imagesPerPage) rest.imagesPerPage = parseInt(rest.imagesPerPage, 10);
         const res = await axiosRetry.get(`${BASE_URL}/Images`, {
-            params: filterNull({ ...getAuthParams(), ...options }), timeout: REQUEST_TIMEOUT
+            params: filterNull({
+                ...getAuthParams(),
+                ...rest,
+                imageStatus: pickStatus(options),
+                excludeImageStatus: pickStatus(options, 'excludeImageStatus')
+            }), timeout: REQUEST_TIMEOUT
         });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
     'count-images': async (options = {}) => {
         log('info', 'count-images', options);
-        if (options.imageStatus) options.imageStatus = resolveStatus(options.imageStatus);
+        const { status: _s, imageStatus: _is, ...rest } = options;
         const res = await axiosRetry.get(`${BASE_URL}/Images/Count`, {
-            params: filterNull({ ...getAuthParams(), ...options }), timeout: REQUEST_TIMEOUT
+            params: filterNull({ ...getAuthParams(), ...rest, imageStatus: pickStatus(options) }),
+            timeout: REQUEST_TIMEOUT
         });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'list-products': async (page, perPage) => {
+    'list-products': async (options = {}) => {
+        const page = options.page;
+        const perPage = options['per-page'] ?? options.perPage;
         log('info', 'list-products', { page, perPage });
         const res = await axiosRetry.get(`${BASE_URL}/ProductIds`, {
             params: filterNull({ ...getAuthParams(), page: page ? parseInt(page, 10) : undefined, productIdsPerPage: perPage ? parseInt(perPage, 10) : undefined }),
@@ -217,11 +237,11 @@ const commands = {
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'delete': async (ticket, customerId) => {
+    'delete': async (ticket, options = {}) => {
         validateId(ticket, 'imageTicket');
         log('info', 'delete', { ticket });
         const res = await axiosRetry.delete(`${BASE_URL}/Image/${ticket}`, {
-            data: filterNull({ ...getAuthParams(), customerImageId: customerId }),
+            data: filterNull({ ...getAuthParams(), customerImageId: pickCustomerId(options) }),
             timeout: REQUEST_TIMEOUT
         });
         checkApiError(res.data);
@@ -230,10 +250,12 @@ const commands = {
     'reject': async (ticket, comment, options = {}) => {
         validateId(ticket, 'imageTicket');
         log('info', 'reject', { ticket });
+        const { 'customer-id': _cid, customerImageId: _cii, ...rest } = options;
         const res = await axiosRetry.put(`${BASE_URL}/Image/Reject/${ticket}`, filterNull({
             ...getAuthParams(),
             comment,
-            ...options
+            ...rest,
+            customerImageId: pickCustomerId(options)
         }), { timeout: REQUEST_TIMEOUT });
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
@@ -309,10 +331,12 @@ if (commands[cmd]) {
                 await commands['white-glove'](filteredArgs[0], options);
             } else if (cmd === 'stack') {
                 await commands.stack(filteredArgs[0], filteredArgs[1], options);
-            } else if (cmd === 'list-images' || cmd === 'count-images' || cmd === 'get-invoices') {
+            } else if (cmd === 'list-images' || cmd === 'count-images' || cmd === 'get-invoices' || cmd === 'list-products') {
                 await commands[cmd](options);
             } else if (cmd === 'reject') {
                 await commands.reject(filteredArgs[0], filteredArgs[1], options);
+            } else if (cmd === 'status' || cmd === 'delete') {
+                await commands[cmd](filteredArgs[0], options);
             } else {
                 await commands[cmd](...filteredArgs);
             }
@@ -342,11 +366,11 @@ Commands:
   upload <path|url> <templateId> [opts]   Submit image for retouching
   white-glove <path|url> [opts]           Submit image for white-glove review
   stack <path|url> <templateId> [opts]    Submit image as part of a stack
-  status <ticket> [customerId]            Get image processing status
+  status <ticket> [--customer-id X]       Get image processing status
   list-images [--status X] [--fromDate]   List images (status: 10/new, 60/in production, 70/production finished, 80/delivered)
   count-images [--status X] [--fromDate]  Count images (accepts same status names or codes)
-  list-products [page] [perPage]          List product IDs with stats
-  delete <ticket> [customerId]            Cancel image processing
+  list-products [--page N] [--per-page N] List product IDs with stats
+  delete <ticket> [--customer-id X]       Cancel image processing
   reject <ticket> <comment> [opts]        Request correction for delivered image
   get-contact                             Get account profile and balance
   get-invoices [--fromDate] [--toDate]    Get billing statements

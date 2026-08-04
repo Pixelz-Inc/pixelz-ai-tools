@@ -10,7 +10,8 @@ from dotenv import load_dotenv
 
 load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env')))
 
-BASE_URL = 'https://api.pixelz.com/REST.svc/JSON'
+# Overridable so tests can point at a local stub and assert the exact outgoing params.
+BASE_URL = os.environ.get('PIXELZ_PLATFORM_BASE_URL', 'https://api.pixelz.com/REST.svc/JSON')
 
 def redact_secrets(text):
     """Replace known credential values and bearer tokens in text with <REDACTED>."""
@@ -170,10 +171,10 @@ def main():
 
     status = subparsers.add_parser('status')
     status.add_argument('ticket')
-    status.add_argument('--customer-id')
+    status.add_argument('--customer-id', '--customerImageId', dest='customer_id')
 
     list_images = subparsers.add_parser('list-images')
-    list_images.add_argument('--status')
+    list_images.add_argument('--status', '--imageStatus', dest='status')
     list_images.add_argument('--excludeImageStatus')
     list_images.add_argument('--productId')
     list_images.add_argument('--fromDate')
@@ -184,7 +185,7 @@ def main():
     list_images.add_argument('--isDescending')
 
     count_images = subparsers.add_parser('count-images')
-    count_images.add_argument('--status')
+    count_images.add_argument('--status', '--imageStatus', dest='status')
     count_images.add_argument('--fromDate')
     count_images.add_argument('--toDate')
 
@@ -194,12 +195,12 @@ def main():
 
     delete = subparsers.add_parser('delete')
     delete.add_argument('ticket')
-    delete.add_argument('--customer-id')
+    delete.add_argument('--customer-id', '--customerImageId', dest='customer_id')
 
     reject = subparsers.add_parser('reject')
     reject.add_argument('ticket')
     reject.add_argument('comment')
-    reject.add_argument('--customer-id')
+    reject.add_argument('--customer-id', '--customerImageId', dest='customer_id')
     reject.add_argument('--markupImageUrl')
 
     subparsers.add_parser('get-contact')
@@ -278,7 +279,9 @@ def main():
         elif args.command == 'list-images':
             log('info', 'list-images')
             params = {**auth}
-            if args.status: params['status'] = resolve_status(args.status)
+            # The API param is `imageStatus`, not `status` — sending `status` silently
+            # returned unfiltered results (PixelzPlatformAPIdocs.txt, "GET Images List").
+            if args.status: params['imageStatus'] = resolve_status(args.status)
             if args.excludeImageStatus: params['excludeImageStatus'] = resolve_status(args.excludeImageStatus)
             for key in ['productId', 'fromDate', 'toDate', 'page', 'imagesPerPage', 'sortBy', 'isDescending']:
                 val = getattr(args, key, None)
@@ -288,7 +291,7 @@ def main():
         elif args.command == 'count-images':
             log('info', 'count-images')
             params = {**auth}
-            if args.status: params['status'] = resolve_status(args.status)
+            if args.status: params['imageStatus'] = resolve_status(args.status)
             for key in ['fromDate', 'toDate']:
                 val = getattr(args, key, None)
                 if val is not None:

@@ -5,8 +5,9 @@ const fs = require('fs');
 // corrupts the CLI's JSON output.
 require('dotenv').config({ quiet: true, path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../.env') });
 
-const AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
-const BASE_URL = 'https://automation-api.pixelz.com/v1';
+// Overridable so tests can point at a local stub and assert the exact outgoing payload.
+const AUTH_URL = process.env.PIXELZ_AUTOMATION_AUTH_URL || 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
+const BASE_URL = process.env.PIXELZ_AUTOMATION_BASE_URL || 'https://automation-api.pixelz.com/v1';
 const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 const MAX_RETRIES = 3;

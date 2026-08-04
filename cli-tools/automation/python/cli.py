@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 
 load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env')))
 
-AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token'
+# Overridable so tests can point at a local stub and assert the exact outgoing payload.
+AUTH_URL = os.environ.get('PIXELZ_AUTOMATION_AUTH_URL', 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token')
 
 def redact_secrets(text):
     """Replace known credential values and bearer tokens in text with <REDACTED>."""
@@ -24,7 +25,7 @@ def redact_secrets(text):
             s = s.replace(val, '<REDACTED>')
     s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
     return s
-BASE_URL = 'https://automation-api.pixelz.com/v1'
+BASE_URL = os.environ.get('PIXELZ_AUTOMATION_BASE_URL', 'https://automation-api.pixelz.com/v1')
 REQUEST_TIMEOUT = 90
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
