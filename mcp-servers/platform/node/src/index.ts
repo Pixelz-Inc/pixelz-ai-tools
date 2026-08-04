@@ -1,6 +1,6 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
+import type { jsonSchemaValidator, JsonSchemaValidatorResult } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import axios from "axios";
 import dotenv from "dotenv";
 import path from "path";
@@ -9,7 +9,9 @@ import { fileURLToPath } from 'url';
 import { z } from "zod";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env') });
+// quiet: dotenv >=17 prints an 'injected env' banner to STDOUT by default, which
+// corrupts the MCP stdio JSON-RPC stream and the CLI's JSON output.
+dotenv.config({ quiet: true, path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env') });
 
 const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
@@ -102,11 +104,7 @@ async function ensureUrl(input: string) {
     return DownloadUrl;
 }
 
-const server = new Server({ name: "pixelz-platform-mcp", version: "1.4.0" }, { capabilities: { tools: {} } });
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-        tools: [
+const TOOLS = [
             {
                 name: "list_templates",
                 description: "List all retouching specification templates available in the Pixelz account. Call this first to discover the templateId required for upload_image.",
@@ -283,9 +281,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     required: ["imagesPath"]
                 }
             },
-        ],
-    };
-});
+] as const;
 
 // --- Status aliases (human-readable names → API numeric codes) ---
 const STATUS_ALIASES: Record<string, string> = {
@@ -388,9 +384,8 @@ const GetInvoicesSchema = z.object({
     returnUrl: z.string().optional(),
 });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+async function callTool(name: string, args: any) {
     const auth = getAuthParams();
-    const { name, arguments: args } = request.params;
     try {
         let response;
         log('info', `Tool called: ${name}`, args);
@@ -483,7 +478,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     } catch (error: any) {
         let errorMsg: string;
         if (error instanceof z.ZodError) {
-            errorMsg = `[VALIDATION_ERROR] ${error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('; ')}`;
+            // zod 4 renamed ZodError.errors -> .issues
+            errorMsg = `[VALIDATION_ERROR] ${error.issues.map(e => `${e.path.join('.')}: ${e.message}`).join('; ')}`;
         } else if (error.response) {
             const status = error.response.status;
             const data = error.response.data;
@@ -499,11 +495,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         log('error', `Tool ${name} failed`, { error: errorMsg });
         return { content: [{ type: "text", text: `Error: ${errorMsg}` }], isError: true };
     }
-});
+}
 
-export { server, getAuthParams, checkApiError, ensureUrl, validateId, redactSecrets, AddColorLibrarySchema };
+// Defer all argument validation to the Zod schemas in callTool rather than letting the SDK's
+// AJV pass reject first. Zod is the stricter of the two (hex-colour regex, min/max bounds the
+// advertised JSON Schema doesn't express) and it produces this project's documented
+// `[VALIDATION_ERROR] field: reason` contract, which the skills tell users to expect.
+const passThroughValidator: jsonSchemaValidator = {
+    getValidator: <T,>() => (input: unknown): JsonSchemaValidatorResult<T> =>
+        ({ valid: true, data: input as T, errorMessage: undefined })
+};
+
+// One factory call per connection; serveStdio pins the instance for its lifetime.
+function buildServer() {
+    const server = new McpServer(
+        { name: "pixelz-platform-mcp", version: "2.0.0" },
+        {
+            capabilities: { tools: {} },
+            // The tool list is a static array — a real TTL lets clients skip re-fetching
+            // and improves LLM prompt-cache hits (SEP-2549). It carries no per-account
+            // data, so shared intermediaries may cache it.
+            cacheHints: { "tools/list": { ttlMs: 3_600_000, cacheScope: "public" } }
+        }
+    );
+    for (const tool of TOOLS) {
+        server.registerTool(
+            tool.name,
+            { description: tool.description, inputSchema: fromJsonSchema(tool.inputSchema, passThroughValidator) },
+            async (args: any) => callTool(tool.name, args) as any
+        );
+    }
+    return server;
+}
+
+export { buildServer, callTool, TOOLS, getAuthParams, checkApiError, ensureUrl, validateId, redactSecrets, AddColorLibrarySchema };
 
 if (process.env.NODE_ENV !== 'test') {
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    // legacy: 'serve' (the default) keeps pre-2026 clients working through the
+    // initialize handshake, so older agent CLIs are unaffected by the v2 upgrade.
+    serveStdio(buildServer);
 }

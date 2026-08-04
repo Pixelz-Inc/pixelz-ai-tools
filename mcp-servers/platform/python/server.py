@@ -6,12 +6,18 @@ import requests
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.caching import CacheHint
 
 _dotenv_path = os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env'))
 load_dotenv(_dotenv_path)
 
-mcp = FastMCP("pixelz-platform-mcp-python")
+# The tool list is static and carries no per-account data, so clients can cache it and
+# shared intermediaries may too (SEP-2549). Mirrors the Node server's cacheHints.
+mcp = MCPServer(
+    "pixelz-platform-mcp-python",
+    cache_hints={"tools/list": CacheHint(ttl_ms=3_600_000, scope="public")},
+)
 BASE_URL = 'https://api.pixelz.com/REST.svc/JSON'
 REQUEST_TIMEOUT = 90
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB

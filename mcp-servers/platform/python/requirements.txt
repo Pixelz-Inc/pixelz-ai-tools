@@ -1,3 +1,5 @@
-mcp
-python-dotenv
-requests
+# Pinned exactly — see the supply-chain policy in CLAUDE.md. An unpinned `mcp` is what
+# let the breaking 2.0.0 release reach fresh installs silently on 2026-07-28.
+mcp==2.0.0
+python-dotenv==1.2.2
+requests==2.34.2

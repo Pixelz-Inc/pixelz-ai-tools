@@ -9,12 +9,18 @@ import requests
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.caching import CacheHint
 
 _dotenv_path = os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env'))
 load_dotenv(_dotenv_path)
 
-mcp = FastMCP("pixelz-automation-mcp")
+# The tool list is static and carries no per-account data, so clients can cache it and
+# shared intermediaries may too (SEP-2549). Mirrors the Node server's cacheHints.
+mcp = MCPServer(
+    "pixelz-automation-mcp",
+    cache_hints={"tools/list": CacheHint(ttl_ms=3_600_000, scope="public")},
+)
 AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token'
 BASE_URL = 'https://automation-api.pixelz.com/v1'
 REQUEST_TIMEOUT = 90
@@ -144,7 +150,7 @@ def _validate_crop_location(value, name):
 def remove_background(imagePath: str, backgroundColor: str = None, transparentBackground: bool = True,
                       featherWidth: float = None, trimapUrl: str = None, callbackUrl: str = None,
                       sync: bool = False) -> str:
-    """AI-powered background removal. Default: async — returns job_id immediately; call get_job_status every 30-60 seconds. featherWidth softens edges (0-1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Set sync=True only if the user explicitly requests it (risk of timeout)."""
+    """AI-powered background removal. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0-1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Set sync=True only if the user explicitly requests it (risk of timeout)."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         _validate_hex_color(backgroundColor, 'backgroundColor')
@@ -166,7 +172,7 @@ def remove_background(imagePath: str, backgroundColor: str = None, transparentBa
 
 @mcp.tool()
 def color_matching(imagePath: str, colorMarkers: list, callbackUrl: str = None, sync: bool = False) -> str:
-    """AI-powered color correction. Default: async — returns job_id immediately; call get_job_status every 30-60 seconds. colorMarkers is an array of objects with x_coordinate, y_coordinate, and either swatch_color_code (hex) or swatch_image. Set sync=True only if the user explicitly requests it."""
+    """AI-powered color correction. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. colorMarkers is an array of objects with x_coordinate, y_coordinate, and either swatch_color_code (hex) or swatch_image. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         if not colorMarkers or not isinstance(colorMarkers, list) or len(colorMarkers) == 0:
@@ -184,7 +190,7 @@ def color_matching(imagePath: str, colorMarkers: list, callbackUrl: str = None, 
 @mcp.tool()
 def create_mask(imagePath: str, featherWidth: float = None, trimapUrl: str = None, callbackUrl: str = None,
                 sync: bool = False) -> str:
-    """Generate a greyscale silhouette mask (white=subject, black=background). Default: async — returns job_id immediately; call get_job_status every 30-60 seconds. Set sync=True only if the user explicitly requests it."""
+    """Generate a greyscale silhouette mask (white=subject, black=background). Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         if featherWidth is not None and featherWidth < 0:
@@ -217,7 +223,7 @@ def create_trimap(imagePath: str, callbackUrl: str = None, sync: bool = False) -
 @mcp.tool()
 def model_crop(imagePath: str, topCropLocation: str = None, bottomCropLocation: str = None,
                callbackUrl: str = None, sync: bool = False) -> str:
-    """Crop a model photograph using anatomical landmarks. Default: async — returns job_id immediately; call get_job_status every 30-60 seconds. Valid locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Set sync=True only if the user explicitly requests it."""
+    """Crop a model photograph using anatomical landmarks. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Valid locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         _validate_crop_location(topCropLocation, 'topCropLocation')
@@ -234,7 +240,7 @@ def model_crop(imagePath: str, topCropLocation: str = None, bottomCropLocation: 
 
 @mcp.tool()
 def get_job_status(jobId: str) -> str:
-    """Poll the status of any async Automation job. Call every 30-60 seconds. PENDING/PROCESSING = still working; FINISHED = result_image_url is ready; FAILED = report the error and ask whether to resubmit."""
+    """Check the status of any async Automation job. Most jobs finish in 30-60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. PENDING/PROCESSING = still working, report status and check again later; FINISHED = result_image_url is ready; FAILED = report the error and ask whether to resubmit."""
     try:
         validate_id(jobId, 'jobId')
         log('info', 'Tool called: get_job_status', {'jobId': jobId})

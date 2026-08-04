@@ -1,6 +1,6 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
+import type { jsonSchemaValidator, JsonSchemaValidatorResult } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import axios from "axios";
 import dotenv from "dotenv";
 import path from "path";
@@ -9,7 +9,9 @@ import { fileURLToPath } from 'url';
 import { z } from "zod";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env') });
+// quiet: dotenv >=17 prints an 'injected env' banner to STDOUT by default, which
+// corrupts the MCP stdio JSON-RPC stream and the CLI's JSON output.
+dotenv.config({ quiet: true, path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env') });
 
 const AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
 const BASE_URL = 'https://automation-api.pixelz.com/v1';
@@ -109,14 +111,10 @@ async function ensureUrlOrId(input: string, token: string) {
     return uploadUrl;
 }
 
-const server = new Server({ name: "pixelz-automation-mcp", version: "1.3.0" }, { capabilities: { tools: {} } });
-
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-        tools: [
+const TOOLS = [
             {
                 name: "remove_background",
-                description: "AI-powered background removal. Default: async — returns job_id immediately; call get_job_status every 30–60 seconds. featherWidth softens edges (0–1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Only set sync=true if the user explicitly requests synchronous processing (risk of timeout).",
+                description: "AI-powered background removal. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0–1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Only set sync=true if the user explicitly requests synchronous processing (risk of timeout).",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -133,7 +131,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "color_matching",
-                description: "AI-powered color correction. Default: async — returns job_id immediately; call get_job_status every 30–60 seconds. Only set sync=true if the user explicitly requests it.",
+                description: "AI-powered color correction. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Only set sync=true if the user explicitly requests it.",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -151,7 +149,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "create_mask",
-                description: "Generate a greyscale silhouette mask (white=subject, black=background). Default: async — returns job_id immediately; call get_job_status every 30–60 seconds. Only set sync=true if the user explicitly requests it.",
+                description: "Generate a greyscale silhouette mask (white=subject, black=background). Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Only set sync=true if the user explicitly requests it.",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -179,7 +177,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "model_crop",
-                description: "Crop a model photograph using anatomical landmarks. Default: async — returns job_id immediately; call get_job_status every 30–60 seconds. Locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Only set sync=true if the user explicitly requests it.",
+                description: "Crop a model photograph using anatomical landmarks. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Only set sync=true if the user explicitly requests it.",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -194,7 +192,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "get_job_status",
-                description: "Poll the status of any async Automation job. Call every 30–60 seconds. PENDING/PROCESSING = still working; FINISHED = result_image_url is ready; FAILED = report the error to the user and ask whether to resubmit.",
+                description: "Check the status of any async Automation job. Most jobs finish in 30–60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. PENDING/PROCESSING = still working, report status and check again later; FINISHED = result_image_url is ready; FAILED = report the error to the user and ask whether to resubmit.",
                 inputSchema: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"] }
             },
             {
@@ -202,9 +200,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 description: "Retrieve the ECDSA public key used to verify Pixelz Automation webhook payload signatures. Store this key in your application to validate incoming webhook requests.",
                 inputSchema: { type: "object", properties: {} }
             },
-        ],
-    };
-});
+] as const;
 
 // --- Zod validation schemas ---
 const CROP_LOCATIONS = ["eye_higher", "below_eye", "btw_eye_and_nose", "below_nose",
@@ -253,9 +249,8 @@ const ModelCropSchema = z.object({
 
 const JobIdSchema = z.object({ jobId: z.string().min(1) });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+async function callTool(name: string, args: any) {
     const token = await getAccessToken();
-    const { name, arguments: args } = request.params;
     try {
         let response;
         log('info', `Tool called: ${name}`, args);
@@ -343,7 +338,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     } catch (error: any) {
         let errorMsg: string;
         if (error instanceof z.ZodError) {
-            errorMsg = `[VALIDATION_ERROR] ${error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('; ')}`;
+            // zod 4 renamed ZodError.errors -> .issues
+            errorMsg = `[VALIDATION_ERROR] ${error.issues.map(e => `${e.path.join('.')}: ${e.message}`).join('; ')}`;
         } else if (error.response) {
             const status = error.response.status;
             const data = error.response.data;
@@ -359,11 +355,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         log('error', `Tool ${name} failed`, { error: errorMsg });
         return { content: [{ type: "text", text: `Error: ${errorMsg}` }], isError: true };
     }
-});
+}
 
-export { server, getAccessToken, ensureUrlOrId, validateId, redactSecrets };
+// Defer all argument validation to the Zod schemas in callTool rather than letting the SDK's
+// AJV pass reject first. Zod is the stricter of the two (hex-colour regex, enum and range
+// bounds the advertised JSON Schema doesn't fully express) and it produces this project's
+// documented `[VALIDATION_ERROR] field: reason` contract, which the skills tell users to expect.
+const passThroughValidator: jsonSchemaValidator = {
+    getValidator: <T,>() => (input: unknown): JsonSchemaValidatorResult<T> =>
+        ({ valid: true, data: input as T, errorMessage: undefined })
+};
+
+// One factory call per connection; serveStdio pins the instance for its lifetime.
+function buildServer() {
+    const server = new McpServer(
+        { name: "pixelz-automation-mcp", version: "2.0.0" },
+        {
+            capabilities: { tools: {} },
+            // The tool list is a static array — a real TTL lets clients skip re-fetching
+            // and improves LLM prompt-cache hits (SEP-2549). It carries no per-account
+            // data, so shared intermediaries may cache it.
+            cacheHints: { "tools/list": { ttlMs: 3_600_000, cacheScope: "public" } }
+        }
+    );
+    for (const tool of TOOLS) {
+        server.registerTool(
+            tool.name,
+            { description: tool.description, inputSchema: fromJsonSchema(tool.inputSchema, passThroughValidator) },
+            async (args: any) => callTool(tool.name, args) as any
+        );
+    }
+    return server;
+}
+
+export { buildServer, callTool, TOOLS, getAccessToken, ensureUrlOrId, validateId, redactSecrets };
 
 if (process.env.NODE_ENV !== 'test') {
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    // legacy: 'serve' (the default) keeps pre-2026 clients working through the
+    // initialize handshake, so older agent CLIs are unaffected by the v2 upgrade.
+    serveStdio(buildServer);
 }

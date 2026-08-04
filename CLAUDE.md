@@ -44,14 +44,20 @@ cd tests/python && python -m pytest                     # Python tests (pytest)
 Users install **one track** at setup time:
 
 ### Track 1 — MCP Servers
-Native Model Context Protocol integration. AI agents call Pixelz API endpoints as tools directly. Two independent servers:
+Native Model Context Protocol integration, implementing the **2026-07-28** specification via
+MCP SDK v2 (`@modelcontextprotocol/server` 2.0.0 / `mcp` 2.0.0). AI agents call Pixelz API
+endpoints as tools directly. Two independent servers:
 - **Platform server** (`mcp-servers/platform/`): image CRUD, templates, white-glove, stack, invoices
 - **Automation server** (`mcp-servers/automation/`): background removal, color matching, masking, trimap, model crop, async job tracking
 
-Each server is a stdio daemon. Tools are registered with full Zod parameter schemas (Node.js) or FastMCP decorators (Python).
+Each server is a stdio daemon. Node.js registers tools via `McpServer.registerTool()`, advertising
+hand-written JSON Schemas through `fromJsonSchema()`; Zod then validates arguments inside the
+handler and produces the `[VALIDATION_ERROR]` messages (a pass-through validator is supplied to
+`fromJsonSchema` so Zod stays the single validation authority). Python uses `MCPServer` with
+`@mcp.tool()` decorators.
 
 ### Track 2 — Skills (SKILL.md files)
-Agent Skills standard — procedural `SKILL.md` files installed to the agent's skills directory (e.g., `~/.claude/skills/`). Each skill delegates execution to the CLI tools. There are 21 skills under `skills/`, named `<api>-<action>/SKILL.md`.
+Agent Skills standard — procedural `SKILL.md` files installed to the agent's skills directory (e.g., `~/.claude/skills/`). Each skill delegates execution to the CLI tools. There are 22 skills under `skills/`, named `<api>-<action>/SKILL.md`.
 
 ## Authentication
 

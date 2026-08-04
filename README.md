@@ -25,9 +25,14 @@ This toolkit offers two paths for integration. During installation, you choose *
 
 For AI agents that support the **Model Context Protocol (MCP)**. Exposes Pixelz endpoints as native tools the AI can call directly. Includes automatic local file handling, full parameter support, Zod input validation (Node.js), and real-time execution. Available in both **Node.js (TypeScript)** and **Python**.
 
+Both servers implement the **2026-07-28** MCP specification (stateless core, `server/discover`,
+cacheable list results) via MCP SDK v2 — `@modelcontextprotocol/server` 2.0.0 on Node.js and
+`mcp` 2.0.0 on Python. Clients still speaking a 2025-era revision are served unchanged through
+the legacy `initialize` handshake, so older agent CLIs keep working without any config change.
+
 ### Track 2: AI Agent Skills (High-Reliability Instructions)
 
-For agents that use the **Agent Skills** standard (`SKILL.md`). Provides 21 procedural skill packages that give the AI deep knowledge of how to use Pixelz services. Uses the CLI tools (`cli.js`/`cli.py`) as internal execution engines. Available in both **Node.js** and **Python**.
+For agents that use the **Agent Skills** standard (`SKILL.md`). Provides 22 procedural skill packages that give the AI deep knowledge of how to use Pixelz services. Uses the CLI tools (`cli.js`/`cli.py`) as internal execution engines. Available in both **Node.js** and **Python**.
 
 ---
 
@@ -103,7 +108,7 @@ pixelz-ai-tools/
 ├── mcp-servers/          # Track 1: MCP server integrations (Node.js & Python)
 │   ├── platform/         #   Platform API server
 │   └── automation/       #   Automation API server
-├── skills/               # Track 2: 21 AI Agent Skill packages (SKILL.md)
+├── skills/               # Track 2: 22 AI Agent Skill packages (SKILL.md)
 ├── cli-tools/            # CLI utilities supporting the Skills track (Node.js & Python)
 │   ├── platform/         #   Platform API CLI
 │   └── automation/       #   Automation API CLI
