@@ -1,4 +1,5 @@
-pytest
-python-dotenv
-requests
-responses
+# Pinned exactly — see the supply-chain policy in CLAUDE.md.
+pytest==9.1.1
+python-dotenv==1.2.2
+requests==2.34.2
+responses==0.26.2

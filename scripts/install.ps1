@@ -216,7 +216,9 @@ if ($trackChoice -eq 1) {
 
         if ($langPref -eq "node") {
             Copy-Item (Join-Path $ProjectRoot "package.json") (Join-Path $targetPath "package.json") -Force
-            Copy-Item (Join-Path $ProjectRoot ".npmrc") (Join-Path $targetPath ".npmrc") -Force
+            # Carry the supply-chain settings into the local install too. This is
+            # pnpm-workspace.yaml (not .npmrc) — pnpm 11 reads only auth/registry from .npmrc.
+            Copy-Item (Join-Path $ProjectRoot "pnpm-workspace.yaml") (Join-Path $targetPath "pnpm-workspace.yaml") -Force
             $lockFile = Join-Path $ProjectRoot "pnpm-lock.yaml"
             if (Test-Path $lockFile) {
                 Copy-Item $lockFile (Join-Path $targetPath "pnpm-lock.yaml") -Force

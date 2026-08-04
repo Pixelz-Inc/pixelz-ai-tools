@@ -1,2 +1,3 @@
-python-dotenv
-requests
+# Pinned exactly — see the supply-chain policy in CLAUDE.md.
+python-dotenv==1.2.2
+requests==2.34.2

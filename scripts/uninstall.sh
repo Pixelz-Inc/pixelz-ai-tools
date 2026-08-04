@@ -42,9 +42,10 @@ else
     echo "No installation found at $AGENT_DIR."
 fi
 
-# For local installs, also remove the CLI tools and npm/pip files that were copied in
+# For local installs, also remove the CLI tools and pnpm/pip files that were copied in.
+# Keep this list in step with what install.sh copies into $TARGET_PATH.
 if $LOCAL_INSTALL; then
-    for item in cli-tools node_modules package.json package-lock.json requirements.txt; do
+    for item in cli-tools node_modules package.json pnpm-lock.yaml pnpm-workspace.yaml requirements.txt; do
         target="$TARGET_PATH/$item"
         if [ -e "$target" ]; then
             echo "Removing $target..."

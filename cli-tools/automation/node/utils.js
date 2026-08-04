@@ -1,6 +1,8 @@
 const axios = require('axios');
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../../../../.env') });
+// quiet: dotenv >=17 prints an 'injected env' banner to STDOUT by default, which
+// corrupts the CLI's JSON output.
+require('dotenv').config({ quiet: true, path: path.resolve(__dirname, '../../../.env') });
 
 const AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
 const BASE_URL = 'https://automation-api.pixelz.com/v1';

@@ -1,0 +1,24 @@
+# Supply-chain hardening.
+#
+# This is the single source of truth for these settings and is honored by pnpm 10 and 11
+# alike. (pnpm 11 reads ONLY auth/registry settings from .npmrc, so .npmrc is not usable
+# for this; pnpm 10 reads this file too, so nothing is lost by having only this one.)
+# Note pnpm 11 defaults minimumReleaseAge to 1440 (24h), so the 7-day value must stay explicit.
+#
+# Settings only (no `packages:` key), so this does NOT make the directory a workspace root —
+# each package is still installed independently by scripts/install.*.
+
+# Quarantine: only install package versions published at least 7 days ago.
+minimumReleaseAge: 10080
+
+# Block lifecycle scripts in dependencies by default.
+ignoreScripts: true
+
+# Pin exact versions when adding dependencies — no ^ or ~ ranges.
+saveExact: true
+
+# Block transitive dependencies that use git repos or tarball URLs.
+blockExoticSubdeps: true
+
+# Prevent installation if a package's trust level decreased vs previous releases.
+trustPolicy: no-downgrade

@@ -8,8 +8,8 @@ Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your 
 
 | Requirement | Version | Check |
 |-------------|---------|-------|
-| Node.js | v18 or higher | `node --version` |
-| pnpm | v10 or higher | `pnpm --version` |
+| Node.js | v22 or higher | `node --version` |
+| pnpm | v11 or higher | `pnpm --version` |
 | Python | v3.10 or higher | `python --version` |
 | pip | any recent version | `pip --version` |
 

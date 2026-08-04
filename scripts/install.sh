@@ -198,7 +198,9 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
 
         if [ "$LANG_PREF" == "node" ]; then
             cp "$PROJECT_ROOT/package.json" "$TARGET_PATH/package.json"
-            cp "$PROJECT_ROOT/.npmrc" "$TARGET_PATH/.npmrc"
+            # Carry the supply-chain settings into the local install too. This is
+            # pnpm-workspace.yaml (not .npmrc) — pnpm 11 reads only auth/registry from .npmrc.
+            cp "$PROJECT_ROOT/pnpm-workspace.yaml" "$TARGET_PATH/pnpm-workspace.yaml"
             [ -f "$PROJECT_ROOT/pnpm-lock.yaml" ] && \
                 cp "$PROJECT_ROOT/pnpm-lock.yaml" "$TARGET_PATH/pnpm-lock.yaml"
             (cd "$TARGET_PATH" && pnpm install --frozen-lockfile) \

@@ -45,7 +45,8 @@ if (Test-Path $agentDir) {
 
 # For local installs, also remove the CLI tools and npm/pip files that were copied in
 if ($localInstall) {
-    foreach ($item in @("cli-tools", "node_modules", "package.json", "package-lock.json", "requirements.txt")) {
+    # Keep this list in step with what install.ps1 copies into $targetPath.
+    foreach ($item in @("cli-tools", "node_modules", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "requirements.txt")) {
         $target = Join-Path $targetPath $item
         if (Test-Path $target) {
             Write-Host "Removing $target..."

@@ -1,6 +1,8 @@
 const axios = require('axios');
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../../../../.env') });
+// quiet: dotenv >=17 prints an 'injected env' banner to STDOUT by default, which
+// corrupts the CLI's JSON output.
+require('dotenv').config({ quiet: true, path: path.resolve(__dirname, '../../../.env') });
 
 const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 

@@ -1,7 +1,9 @@
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
-require('dotenv').config({ path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../.env') });
+// quiet: dotenv >=17 prints an 'injected env' banner to STDOUT by default, which
+// corrupts the CLI's JSON output.
+require('dotenv').config({ quiet: true, path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../.env') });
 
 const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
