@@ -64,6 +64,13 @@ jobs:
             mcp-servers/platform/node/pnpm-lock.yaml
             mcp-servers/automation/node/pnpm-lock.yaml
             tests/node/pnpm-lock.yaml
+      # The cliFlags tests assert Node and Python send identical API params, so they
+      # shell out to `python cli.py` -- this job needs the Python CLI's deps too.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install Python CLI dependencies
+        run: pip install -r requirements.txt
       - name: Install MCP server dependencies
         run: |
           cd mcp-servers/platform/node && pnpm install --frozen-lockfile
