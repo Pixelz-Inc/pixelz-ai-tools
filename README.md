@@ -46,7 +46,7 @@ Provide a local file path (e.g., `/home/user/product.jpg`) or a public URL. The 
 
 ### Agentic Ergonomics
 Every skill and tool is optimized for AI reliability:
-- **Wait Heuristics**: Appropriate polling intervals for async operations.
+- **Polling Guidance**: States expected job duration and instructs one check per turn rather than a wall-clock wait an agent cannot honor.
 - **Exhaustive Enums**: All possible options provided (e.g., 17 model-crop anatomical locations).
 - **Success Criteria**: Guides the AI on how to format output (Markdown tables for invoices, templates, etc.).
 

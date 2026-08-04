@@ -40,14 +40,14 @@ Capture the `job_id` from the response.
 node cli-tools/automation/node/cli.js status <JOB_ID>
 ```
 
-**Wait 30–60 seconds between polls.** Continue until the status changes.
+Most jobs finish in **30–60 seconds**; large or complex images can take several minutes.
 
-| Status | Meaning |
-|--------|---------|
-| `PENDING` | Job queued, not yet started |
-| `PROCESSING` | AI is actively working |
-| `FINISHED` | Complete — result is ready |
-| `FAILED` | Processing error — do not retry automatically |
+Run the status command **once per check — never in a loop**. You cannot wait out a
+wall-clock interval mid-turn, and back-to-back calls only add API load without advancing
+the job. If the job is still running, report the status and check again on a later turn or
+when the user asks.
+
+See `automation-get-job-status` for the full status table and result handling.
 
 ---
 

@@ -13,7 +13,7 @@ node cli-tools/automation/node/cli.js remove-bg "<PATH_OR_URL>" [--color <HEX>] 
 ```
 
 ## Input requirement
-If the user has not provided a full file path or URL, ask for it before proceeding. Do not search the filesystem for the file — the user must supply the exact path (e.g., `C:\Dev\pixelztest\test.jpeg`).
+If the user has not provided a full file path or URL, ask for it before proceeding. Do not search the filesystem for the file — the user must supply the exact path (e.g. `/Users/me/photos/shirt.jpg` on macOS/Linux, `C:\photos\shirt.jpg` on Windows).
 
 ## Detailed Parameters
 - `PATH_OR_URL`: (Required) Full path to a local image file or a direct public URL. The tool handles secure S3 upload automatically for local files.
