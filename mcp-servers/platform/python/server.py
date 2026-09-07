@@ -1,8 +1,8 @@
 import os
-import sys
 import json
 import re
 import requests
+from urllib.parse import quote, quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
@@ -30,12 +30,21 @@ _session.mount('http://', HTTPAdapter(max_retries=_retry))
 _log_file = os.getenv('PIXELZ_LOG_FILE')
 
 def redact_secrets(text):
-    """Replace known credential values and bearer tokens in text with <REDACTED>."""
+    """Replace known credential values and bearer tokens in text with <REDACTED>.
+
+    Credentials are matched in raw AND percent-encoded form: requests echoes the whole
+    request URL in ConnectionError text, and Platform auth travels as query params, so a
+    key containing + / = @ appears encoded there and a literal match silently misses it.
+    The param-name pass is the backstop for any encoding these variants don't anticipate.
+    """
     s = str(text)
     for key in ('PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL'):
         val = os.getenv(key)
-        if val:
-            s = s.replace(val, '<REDACTED>')
+        if not val:
+            continue
+        for variant in {val, quote(val, safe=''), quote_plus(val)}:
+            s = s.replace(variant, '<REDACTED>')
+    s = re.sub(r'(contactAPIkey|contactEmail)=[^&\s\'"]*', r'\1=<REDACTED>', s, flags=re.IGNORECASE)
     s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
     return s
 
@@ -59,6 +68,16 @@ def get_auth():
     if not email or not api_key:
         raise ValueError("[AUTH_ERROR] Missing PIXELZ_PLATFORM_EMAIL or PIXELZ_PLATFORM_API_KEY in .env")
     return {'contactEmail': email, 'contactAPIkey': api_key}
+
+def _checked(response):
+    """Raise on a non-2xx status, then decode JSON.
+
+    check_api_error() only inspects the body's ErrorCode, so without this an HTTP 4xx/5xx
+    whose body carries no ErrorCode was handed to the agent as a successful result — and
+    _format_error's HTTPError branch could never fire for a tool call.
+    """
+    response.raise_for_status()
+    return response.json()
 
 def check_api_error(data):
     if isinstance(data, dict):
@@ -92,7 +111,10 @@ def ensure_url(input_path):
         raise Exception("RequestPresignUrls returned an unexpected response.")
     log('info', 'Uploading file to S3', {'fileName': file_name, 'size': file_size})
     with open(resolved, 'rb') as f:
-        _session.put(body[0]['UploadUrl'], data=f, headers={'Content-Type': 'application/octet-stream'}, timeout=REQUEST_TIMEOUT)
+        r_put = _session.put(body[0]['UploadUrl'], data=f, headers={'Content-Type': 'application/octet-stream'}, timeout=REQUEST_TIMEOUT)
+        # Without this the DownloadUrl is returned for an object that was never stored,
+        # and the retouching job is created against a missing file.
+        r_put.raise_for_status()
     return body[0]['DownloadUrl']
 
 def _format_error(tool_name, e):
@@ -135,7 +157,7 @@ def list_templates() -> str:
     """List all retouching specification templates in the Pixelz account. Call this first to discover the templateId required for upload_image."""
     try:
         log('info', 'Tool called: list_templates')
-        data = _session.get(f"{BASE_URL}/Templates", params=get_auth(), timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/Templates", params=get_auth(), timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -148,7 +170,7 @@ def get_template_detail(templateId: str) -> str:
         _validate_required_str(templateId, 'templateId')
         validate_id(templateId, 'templateId')
         log('info', 'Tool called: get_template_detail', {'templateId': templateId})
-        data = _session.get(f"{BASE_URL}/Template/{templateId}", params=get_auth(), timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/Template/{templateId}", params=get_auth(), timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -182,7 +204,7 @@ def upload_image(imagePath: str, templateId: str, customerImageId: str = None, p
             'outputFileName': outputFileName, 'customerImageColorID': customerImageColorID,
             'colorwayIds': colorwayIds
         }.items() if v is not None}
-        data = _session.post(f"{BASE_URL}/Image", json=payload, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.post(f"{BASE_URL}/Image", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -203,7 +225,7 @@ def white_glove_service(imagePath: str, comment: str = None, markupImageUrl: str
             'productId': productId, 'customerFolder': customerFolder,
             'imageCallbackURL': imageCallbackURL
         }.items() if v is not None}
-        data = _session.post(f"{BASE_URL}/WhiteGloveService", json=payload, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.post(f"{BASE_URL}/WhiteGloveService", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -224,7 +246,7 @@ def stack_image(imagePath: str, templateId: str = None, customerImageId: str = N
             'imageCallbackURL': imageCallbackURL,
             'imageDeadlineDateTimeUTC': imageDeadlineDateTimeUTC
         }.items() if v is not None}
-        data = _session.post(f"{BASE_URL}/StackImage", json=payload, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.post(f"{BASE_URL}/StackImage", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -238,7 +260,7 @@ def get_image_status(imageTicket: str, customerImageId: str = None) -> str:
         validate_id(imageTicket, 'imageTicket')
         log('info', 'Tool called: get_image_status', {'imageTicket': imageTicket})
         params = {**get_auth(), 'customerImageId': customerImageId}
-        data = _session.get(f"{BASE_URL}/Image/{imageTicket}", params={k: v for k, v in params.items() if v is not None}, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/Image/{imageTicket}", params={k: v for k, v in params.items() if v is not None}, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -258,7 +280,7 @@ def list_images(imageStatus: str = None, excludeImageStatus: str = None, product
             'productId': productId, 'fromDate': fromDate, 'toDate': toDate,
             'page': page, 'imagesPerPage': imagesPerPage, 'sortBy': sortBy, 'isDescending': isDescending
         }.items() if v is not None}
-        data = _session.get(f"{BASE_URL}/Images", params=params, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/Images", params=params, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -271,7 +293,7 @@ def count_images(imageStatus: str = None, fromDate: str = None, toDate: str = No
         log('info', 'Tool called: count_images')
         imageStatus = _resolve_status(imageStatus)
         params = {k: v for k, v in {**get_auth(), 'imageStatus': imageStatus, 'fromDate': fromDate, 'toDate': toDate}.items() if v is not None}
-        data = _session.get(f"{BASE_URL}/Images/Count", params=params, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/Images/Count", params=params, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -282,7 +304,7 @@ def list_product_ids(page: int = 1, perPage: int = 10) -> str:
     """List product IDs with completion statistics (TodoCount vs DoneCount). Useful for tracking whether an entire product batch has been fully retouched."""
     try:
         log('info', 'Tool called: list_product_ids')
-        data = _session.get(f"{BASE_URL}/ProductIds", params={**get_auth(), 'page': page, 'productIdsPerPage': perPage}, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/ProductIds", params={**get_auth(), 'page': page, 'productIdsPerPage': perPage}, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -295,7 +317,7 @@ def delete_image(imageTicket: str) -> str:
         _validate_required_str(imageTicket, 'imageTicket')
         validate_id(imageTicket, 'imageTicket')
         log('info', 'Tool called: delete_image', {'imageTicket': imageTicket})
-        data = _session.delete(f"{BASE_URL}/Image/{imageTicket}", json=get_auth(), timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.delete(f"{BASE_URL}/Image/{imageTicket}", json=get_auth(), timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -310,7 +332,7 @@ def reject_image(imageTicket: str, comment: str, markupImageUrl: str = None, cus
         validate_id(imageTicket, 'imageTicket')
         log('info', 'Tool called: reject_image', {'imageTicket': imageTicket})
         payload = {k: v for k, v in {**get_auth(), 'comment': comment, 'markupImageUrl': markupImageUrl, 'customerImageId': customerImageId}.items() if v is not None}
-        data = _session.put(f"{BASE_URL}/Image/Reject/{imageTicket}", json=payload, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.put(f"{BASE_URL}/Image/Reject/{imageTicket}", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -321,7 +343,7 @@ def get_contact() -> str:
     """Retrieve account profile including company details and current credit balance (ContactAccountBalance and Currency)."""
     try:
         log('info', 'Tool called: get_contact')
-        data = _session.get(f"{BASE_URL}/Contact", params=get_auth(), timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/Contact", params=get_auth(), timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -333,7 +355,7 @@ def get_invoices(fromDate: str = None, toDate: str = None, page: int = 1, return
     try:
         log('info', 'Tool called: get_invoices')
         params = {k: v for k, v in {**get_auth(), 'fromDate': fromDate, 'toDate': toDate, 'page': page, 'returnUrl': returnUrl}.items() if v is not None}
-        data = _session.get(f"{BASE_URL}/Invoices", params=params, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.get(f"{BASE_URL}/Invoices", params=params, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
@@ -348,7 +370,7 @@ def add_color_library(imagesPath: list[str]) -> str:
             raise ValueError("imagesPath must contain at least one image path or URL")
         resolved_urls = [ensure_url(p) for p in imagesPath]
         payload = {**get_auth(), 'imagesUrl': resolved_urls}
-        data = _session.post(f"{BASE_URL}/AddColorLibrary", json=payload, timeout=REQUEST_TIMEOUT).json()
+        data = _checked(_session.post(f"{BASE_URL}/AddColorLibrary", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:

@@ -1,12 +1,16 @@
 # Supply-chain hardening.
 #
-# This is the single source of truth for these settings and is honored by pnpm 10 and 11
-# alike. (pnpm 11 reads ONLY auth/registry settings from .npmrc, so .npmrc is not usable
-# for this; pnpm 10 reads this file too, so nothing is lost by having only this one.)
+# DUPLICATED BY DESIGN: an identical copy of this file sits next to every install root
+# (repo root, mcp-servers/{platform,automation}/node, tests/node). pnpm reads these settings
+# from the directory it installs in, and scripts/install.* installs each package
+# independently, so every root needs its own copy. Editing one does NOT propagate —
+# change all four together, or the quarantine silently lapses where you missed one.
+#
+# Honored by pnpm 10 and 11 alike. (pnpm 11 reads ONLY auth/registry settings from .npmrc,
+# so .npmrc is not usable for this; pnpm 10 reads this file too, so nothing is lost.)
 # Note pnpm 11 defaults minimumReleaseAge to 1440 (24h), so the 7-day value must stay explicit.
 #
-# Settings only (no `packages:` key), so this does NOT make the directory a workspace root —
-# each package is still installed independently by scripts/install.*.
+# Settings only (no `packages:` key), so this does NOT make the directory a workspace root.
 
 # Quarantine: only install package versions published at least 7 days ago.
 minimumReleaseAge: 10080

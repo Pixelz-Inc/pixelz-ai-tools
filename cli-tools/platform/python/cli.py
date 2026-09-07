@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import requests
+from urllib.parse import quote, quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import argparse
@@ -14,12 +15,21 @@ load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join
 BASE_URL = os.environ.get('PIXELZ_PLATFORM_BASE_URL', 'https://api.pixelz.com/REST.svc/JSON')
 
 def redact_secrets(text):
-    """Replace known credential values and bearer tokens in text with <REDACTED>."""
+    """Replace known credential values and bearer tokens in text with <REDACTED>.
+
+    Credentials are matched in raw AND percent-encoded form: requests echoes the whole
+    request URL in ConnectionError text, and Platform auth travels as query params, so a
+    key containing + / = @ appears encoded there and a literal match silently misses it.
+    The param-name pass is the backstop for any encoding these variants don't anticipate.
+    """
     s = str(text)
     for key in ('PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL'):
         val = os.getenv(key)
-        if val:
-            s = s.replace(val, '<REDACTED>')
+        if not val:
+            continue
+        for variant in {val, quote(val, safe=''), quote_plus(val)}:
+            s = s.replace(variant, '<REDACTED>')
+    s = re.sub(r'(contactAPIkey|contactEmail)=[^&\s\'"]*', r'\1=<REDACTED>', s, flags=re.IGNORECASE)
     s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
     return s
 REQUEST_TIMEOUT = 90
@@ -60,8 +70,10 @@ def get_auth():
     email = os.getenv('PIXELZ_PLATFORM_EMAIL')
     key = os.getenv('PIXELZ_PLATFORM_API_KEY')
     if not email or not key:
-        print("[AUTH_ERROR] Missing Platform API credentials.")
-        print("Required: PIXELZ_PLATFORM_EMAIL and PIXELZ_PLATFORM_API_KEY in .env file.")
+        # stderr, not stdout: callers parse stdout as JSON, so a diagnostic there would
+        # surface as a JSON parse error instead of an actionable auth message.
+        print("[AUTH_ERROR] Missing Platform API credentials.", file=sys.stderr)
+        print("Required: PIXELZ_PLATFORM_EMAIL and PIXELZ_PLATFORM_API_KEY in .env file.", file=sys.stderr)
         sys.exit(1)
     return {'contactEmail': email, 'contactAPIkey': key}
 
@@ -334,9 +346,11 @@ def main():
     except requests.exceptions.Timeout:
         log('error', f'{args.command} failed', {'error': 'timeout'})
         print("[TIMEOUT] Request timed out", file=sys.stderr)
+        sys.exit(1)
     except requests.exceptions.ConnectionError as e:
         log('error', f'{args.command} failed', {'error': str(e)})
         print(redact_secrets(f"[NETWORK_ERROR] {e}"), file=sys.stderr)
+        sys.exit(1)
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else '?'
         log('error', f'{args.command} failed', {'error': f'HTTP {status}'})
@@ -345,9 +359,11 @@ def main():
             print(redact_secrets(f"[HTTP_{status}] {json.dumps(body, indent=2)}"), file=sys.stderr)
         except Exception:
             print(redact_secrets(f"[HTTP_{status}] {e.response.text}"), file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
         print(redact_secrets(f"[API_ERROR] {e}"), file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

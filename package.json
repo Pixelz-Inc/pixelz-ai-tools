@@ -5,7 +5,9 @@
   "scripts": {
     "setup:node": "pnpm install",
     "test": "cd tests/node && pnpm exec vitest run",
-    "test:python": "cd tests/python && python -m pytest"
+    "test:python": "cd tests/python && python -m pytest",
+    "lint:python": "ruff check .",
+    "lint:clitools": "cd tests/node && pnpm exec tsc -p tsconfig.clitools.json"
   },
   "dependencies": {
     "axios": "1.18.1",

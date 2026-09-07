@@ -6,6 +6,7 @@ import time
 import threading
 import mimetypes
 import requests
+from urllib.parse import quote, quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import argparse
@@ -17,12 +18,21 @@ load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join
 AUTH_URL = os.environ.get('PIXELZ_AUTOMATION_AUTH_URL', 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token')
 
 def redact_secrets(text):
-    """Replace known credential values and bearer tokens in text with <REDACTED>."""
+    """Replace known credential values and bearer tokens in text with <REDACTED>.
+
+    Credentials are matched in raw AND percent-encoded form. Automation creds travel in a
+    form-encoded POST body, so they appear percent-encoded wherever requests echoes that
+    body or a redirected URL, and a literal match would silently miss them. The param-name
+    pass is the backstop for any encoding these variants don't anticipate.
+    """
     s = str(text)
     for key in ('PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'):
         val = os.getenv(key)
-        if val:
-            s = s.replace(val, '<REDACTED>')
+        if not val:
+            continue
+        for variant in {val, quote(val, safe=''), quote_plus(val)}:
+            s = s.replace(variant, '<REDACTED>')
+    s = re.sub(r'(client_id|client_secret)=[^&\s\'"]*', r'\1=<REDACTED>', s, flags=re.IGNORECASE)
     s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
     return s
 BASE_URL = os.environ.get('PIXELZ_AUTOMATION_BASE_URL', 'https://automation-api.pixelz.com/v1')
@@ -62,8 +72,10 @@ def get_token():
         cid = os.getenv('PIXELZ_AUTOMATION_CLIENT_ID')
         sec = os.getenv('PIXELZ_AUTOMATION_CLIENT_SECRET')
         if not cid or not sec:
-            print("[AUTH_ERROR] Missing Automation API credentials.")
-            print("Required: PIXELZ_AUTOMATION_CLIENT_ID and PIXELZ_AUTOMATION_CLIENT_SECRET in .env file.")
+            # stderr, not stdout: callers parse stdout as JSON, so a diagnostic there would
+            # surface as a JSON parse error instead of an actionable auth message.
+            print("[AUTH_ERROR] Missing Automation API credentials.", file=sys.stderr)
+            print("Required: PIXELZ_AUTOMATION_CLIENT_ID and PIXELZ_AUTOMATION_CLIENT_SECRET in .env file.", file=sys.stderr)
             sys.exit(1)
 
         log('info', 'Requesting new OAuth token')
@@ -148,8 +160,6 @@ def main():
         parser.print_help()
         return
 
-    token = get_token()
-
     def make_headers(sync=False):
         h = {'Authorization': f'Bearer {token}'}
         if not sync:
@@ -157,6 +167,11 @@ def main():
         return h
 
     try:
+        # Inside the try: a failure here (network, bad credentials, non-2xx from Keycloak)
+        # must reach the handlers below so it is redacted and categorized. Called outside,
+        # it escaped as a raw traceback carrying the unredacted OAuth request.
+        token = get_token()
+
         if args.command == 'remove-bg':
             log('info', 'remove-bg')
             url_or_id = ensure_url_or_id(args.input, token)
@@ -236,9 +251,11 @@ def main():
     except requests.exceptions.Timeout:
         log('error', f'{args.command} failed', {'error': 'timeout'})
         print("[TIMEOUT] Request timed out", file=sys.stderr)
+        sys.exit(1)
     except requests.exceptions.ConnectionError as e:
         log('error', f'{args.command} failed', {'error': str(e)})
         print(redact_secrets(f"[NETWORK_ERROR] {e}"), file=sys.stderr)
+        sys.exit(1)
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else '?'
         log('error', f'{args.command} failed', {'error': f'HTTP {status}'})
@@ -247,9 +264,11 @@ def main():
             print(redact_secrets(f"[HTTP_{status}] {json.dumps(body, indent=2)}"), file=sys.stderr)
         except Exception:
             print(redact_secrets(f"[HTTP_{status}] {e.response.text}"), file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
         print(redact_secrets(f"[API_ERROR] {e}"), file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

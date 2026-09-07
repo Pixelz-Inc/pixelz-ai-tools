@@ -38,8 +38,15 @@ function redactSecrets(text: string): string {
     let s = text;
     for (const key of ['PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL']) {
         const val = process.env[key];
-        if (val) s = s.replaceAll(val, '<REDACTED>');
+        if (!val) continue;
+        // Match raw AND percent-encoded forms: a credential echoed back inside a URL
+        // appears encoded, where a literal match would silently miss it.
+        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val)])) {
+            s = s.replaceAll(variant, '<REDACTED>');
+        }
     }
+    // Backstop by param name, so an encoding the variants above miss still cannot leak.
+    s = s.replace(/(contactAPIkey|contactEmail)=[^&\s'"]*/gi, '$1=<REDACTED>');
     return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
 }
 
@@ -134,7 +141,7 @@ const TOOLS = [
                         comment: { type: "string", description: "Instructions for the retouching expert" },
                         markupImageUrl: { type: "string" },
                         swatchImageURL: { type: "string" },
-                        swatchColorCode: { type: "string" },
+                        swatchColorCode: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$", description: "Hex color like #FFFFFF" },
                         markerX: { type: "number" }, markerY: { type: "number" },
                         outputFileName: { type: "string" },
                         customerImageColorID: { type: "string" },
@@ -203,7 +210,7 @@ const TOOLS = [
                         fromDate: { type: "string", description: "YYYY-MM-DD" },
                         toDate: { type: "string", description: "YYYY-MM-DD" },
                         page: { type: "number" },
-                        imagesPerPage: { type: "number", description: "Max 100" },
+                        imagesPerPage: { type: "number", maximum: 100, description: "Max 100" },
                         sortBy: { type: "string", enum: ["id", "date", "status"] },
                         isDescending: { type: "string", enum: ["true", "false"] }
                     }
@@ -276,7 +283,7 @@ const TOOLS = [
                 inputSchema: {
                     type: "object",
                     properties: {
-                        imagesPath: { type: "array", items: { type: "string" }, description: "Array of local file paths or public URLs of color swatch images" }
+                        imagesPath: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1, description: "Array of local file paths or public URLs of color swatch images" }
                     },
                     required: ["imagesPath"]
                 }
@@ -385,8 +392,10 @@ const GetInvoicesSchema = z.object({
 });
 
 async function callTool(name: string, args: any) {
-    const auth = getAuthParams();
     try {
+        // Inside the try: getAuthParams() throws when credentials are missing, and callers
+        // are promised a structured [AUTH_ERROR] result rather than a protocol-level throw.
+        const auth = getAuthParams();
         let response;
         log('info', `Tool called: ${name}`, args);
         switch (name) {
@@ -498,9 +507,10 @@ async function callTool(name: string, args: any) {
 }
 
 // Defer all argument validation to the Zod schemas in callTool rather than letting the SDK's
-// AJV pass reject first. Zod is the stricter of the two (hex-colour regex, min/max bounds the
-// advertised JSON Schema doesn't express) and it produces this project's documented
+// AJV pass reject first, so every rejection carries this project's documented
 // `[VALIDATION_ERROR] field: reason` contract, which the skills tell users to expect.
+// The advertised JSON Schema now states the same bounds Zod enforces, so agents can predict
+// a rejection before calling; Zod stays the single authority that produces the message.
 const passThroughValidator: jsonSchemaValidator = {
     getValidator: <T,>() => (input: unknown): JsonSchemaValidatorResult<T> =>
         ({ valid: true, data: input as T, errorMessage: undefined })

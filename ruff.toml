@@ -1,0 +1,11 @@
+# Correctness-focused lint, deliberately not a formatter.
+#
+# The default rule set flags ~116 import-ordering and style issues across this repo.
+# Reformatting all of that would bury real defects in churn, so this selects only rules
+# that catch bugs: E9 (syntax/runtime errors), F (pyflakes — undefined names, unused
+# imports and variables), B (bugbear — mutable default args, and similar latent bugs).
+# Widen this deliberately, not by accident.
+target-version = "py312"
+
+[lint]
+select = ["E9", "F", "B"]

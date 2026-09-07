@@ -34,6 +34,8 @@ the legacy `initialize` handshake, so older agent CLIs keep working without any 
 
 For agents that use the **Agent Skills** standard (`SKILL.md`). Provides 22 procedural skill packages that give the AI deep knowledge of how to use Pixelz services. Uses the CLI tools (`cli.js`/`cli.py`) as internal execution engines. Available in both **Node.js** and **Python**.
 
+The installer rewrites each skill's command to the **absolute** path of the CLI it installed, so skills work from any working directory — not just the repo root.
+
 ---
 
 ## Key Features
@@ -131,6 +133,12 @@ cd tests/node && pnpm install && pnpm exec vitest run
 # Python
 pip install -r tests/python/requirements.txt
 python -m pytest tests/python/ -v
+```
+
+**Linters:**
+```bash
+ruff check .                                              # Python (correctness rules)
+cd tests/node && pnpm exec tsc -p tsconfig.clitools.json  # CLI tools (type-check)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup.

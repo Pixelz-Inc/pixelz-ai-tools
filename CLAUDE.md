@@ -87,10 +87,13 @@ When adding or modifying a feature, both implementations must stay in sync.
 
 ## Key Reference Files
 
-| File | Purpose |
-|------|---------|
-| `requirements.md` | Master blueprint — authoritative design decisions |
-| `pixelz-automation-api.json` | Full OpenAPI 3.0 spec for the Automation API |
-| `PixelzPlatformAPIdocs.txt` | Platform API reference |
-| `.env.example` | Credential template |
-| `skills/automation-workflow/SKILL.md` | Orchestration skill showing how skills chain together |
+| File | Purpose | In git? |
+|------|---------|---------|
+| `requirements.md` | Master blueprint — authoritative design decisions | No — local only |
+| `pixelz-automation-api.json` | Full OpenAPI 3.0 spec for the Automation API | No — local only |
+| `PixelzPlatformAPIdocs.txt` | Platform API reference | No — local only |
+| `.env.example` | Credential template | Yes |
+| `skills/automation-workflow/SKILL.md` | Orchestration skill showing how skills chain together | Yes |
+
+The first three are deliberately gitignored (not for distribution), so a fresh clone will
+not have them. Ask the repo owner for a copy if you need to consult them.

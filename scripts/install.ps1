@@ -209,10 +209,14 @@ if ($trackChoice -eq 1) {
     Write-Host "Installing AI Agent Skills Track..." -ForegroundColor Green
 
     if ($localInstall) {
-        # Copy CLI tools to the local target so skills can invoke them from there
-        $cliDest = Join-Path $targetPath "cli-tools"
-        if (!(Test-Path $cliDest)) { New-Item -ItemType Directory -Path $cliDest -Force | Out-Null }
-        Copy-Item -Path (Join-Path $ProjectRoot "cli-tools\*") -Destination $cliDest -Recurse -Force
+        # Copy CLI tools to the local target so skills can invoke them from there.
+        # Only the selected language's tree - the skills are patched to one language, so
+        # shipping the other is dead weight the user would have to trust and update.
+        foreach ($api in @("platform", "automation")) {
+            $langDest = Join-Path $targetPath "cli-tools\$api\$langPref"
+            if (!(Test-Path $langDest)) { New-Item -ItemType Directory -Path $langDest -Force | Out-Null }
+            Copy-Item -Path (Join-Path $ProjectRoot "cli-tools\$api\$langPref\*") -Destination $langDest -Recurse -Force
+        }
 
         if ($langPref -eq "node") {
             Copy-Item (Join-Path $ProjectRoot "package.json") (Join-Path $targetPath "package.json") -Force
@@ -281,20 +285,46 @@ if ($trackChoice -eq 1) {
     if (!(Test-Path $skillsDir)) {
         New-Item -ItemType Directory -Path $skillsDir -Force | Out-Null
     }
-    Copy-Item -Path "skills\*" -Destination $skillsDir -Recurse -Force
+    # Remove previously deployed Pixelz skills first, so skills dropped upstream don't
+    # linger in the agent's directory across reinstalls.
+    Get-ChildItem -Path (Join-Path $ProjectRoot "skills") -Directory | ForEach-Object {
+        $stale = Join-Path $skillsDir $_.Name
+        if (Test-Path $stale) { Remove-Item $stale -Recurse -Force }
+    }
+    Copy-Item -Path (Join-Path $ProjectRoot "skills\*") -Destination $skillsDir -Recurse -Force
 
-    # Patch CLI commands in copied skills to match the selected language
+    # Rewrite each skill's CLI command to an ABSOLUTE path, and to the chosen language.
+    #
+    # Skills are read by the agent and run in the agent's working directory - the user's
+    # own project - not in this repo. The relative `cli-tools/...` path in the source
+    # SKILL.md therefore resolves only when cwd happens to be the project root, so a
+    # global install produced "Cannot find module" for every skill. $cliRoot is wherever
+    # cli-tools actually landed for this install scope.
+    if ($localInstall) {
+        $cliRoot = Join-Path $targetPath "cli-tools"
+    } else {
+        $cliRoot = Join-Path $ProjectRoot "cli-tools"
+    }
+
     if ($langPref -eq "python") {
-        Get-ChildItem -Path $skillsDir -Recurse -Filter "SKILL.md" | ForEach-Object {
-            $content = Get-Content $_.FullName -Raw
-            $content = $content -replace 'node cli-tools/automation/node/cli\.js', 'python cli-tools/automation/python/cli.py'
-            $content = $content -replace 'node cli-tools/platform/node/cli\.js', 'python cli-tools/platform/python/cli.py'
-            Set-Content $_.FullName -Value $content -Encoding UTF8
-        }
-        Write-Host "Skills patched to use Python CLI."
+        $newPlatform   = "python `"$(Join-Path $cliRoot 'platform\python\cli.py')`""
+        $newAutomation = "python `"$(Join-Path $cliRoot 'automation\python\cli.py')`""
+    } else {
+        $newPlatform   = "node `"$(Join-Path $cliRoot 'platform\node\cli.js')`""
+        $newAutomation = "node `"$(Join-Path $cliRoot 'automation\node\cli.js')`""
+    }
+
+    # .Replace() is a literal string swap - unlike -replace it treats the path as data,
+    # so backslashes and $ in the target path are not reinterpreted.
+    Get-ChildItem -Path $skillsDir -Recurse -Filter "SKILL.md" | ForEach-Object {
+        $content = Get-Content $_.FullName -Raw
+        $content = $content.Replace('node cli-tools/automation/node/cli.js', $newAutomation)
+        $content = $content.Replace('node cli-tools/platform/node/cli.js', $newPlatform)
+        Set-Content $_.FullName -Value $content -Encoding UTF8
     }
 
     Write-Host "Skills deployed to: $skillsDir"
+    Write-Host "Skills invoke the CLI at: $cliRoot"
 }
 
 Pop-Location

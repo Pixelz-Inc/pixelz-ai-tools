@@ -1,0 +1,19 @@
+{
+  // Type-checks the plain-CommonJS CLI tools without emitting anything.
+  //
+  // It lives here because this package already has typescript and @types/node pinned as
+  // devDependencies, so checking the CLIs adds no new dependency anywhere. checkJs
+  // surfaces real defects in .js (bad property access, arity errors, typos) that nothing
+  // else in this repo was catching. Run with: pnpm run lint:clitools
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "module": "node16",
+    "moduleResolution": "node16",
+    "target": "es2022",
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "include": ["../../cli-tools/platform/node/cli.js", "../../cli-tools/automation/node/cli.js"]
+}

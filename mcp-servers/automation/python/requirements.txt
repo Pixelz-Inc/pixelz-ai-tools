@@ -3,3 +3,5 @@
 mcp==2.0.0
 python-dotenv==1.2.2
 requests==2.34.2
+# Imported directly (urllib3.util.retry.Retry) — pinned rather than relying on requests' transitive pin.
+urllib3==2.4.0

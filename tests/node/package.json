@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint:clitools": "tsc -p tsconfig.clitools.json"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

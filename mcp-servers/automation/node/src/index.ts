@@ -39,8 +39,15 @@ function redactSecrets(text: string): string {
     let s = text;
     for (const key of ['PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET']) {
         const val = process.env[key];
-        if (val) s = s.replaceAll(val, '<REDACTED>');
+        if (!val) continue;
+        // Match raw AND percent-encoded forms: a credential echoed back inside a URL
+        // appears encoded, where a literal match would silently miss it.
+        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val)])) {
+            s = s.replaceAll(variant, '<REDACTED>');
+        }
     }
+    // Backstop by param name, so an encoding the variants above miss still cannot leak.
+    s = s.replace(/(client_id|client_secret)=[^&\s'"]*/gi, '$1=<REDACTED>');
     return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
 }
 
@@ -250,8 +257,11 @@ const ModelCropSchema = z.object({
 const JobIdSchema = z.object({ jobId: z.string().min(1) });
 
 async function callTool(name: string, args: any) {
-    const token = await getAccessToken();
     try {
+        // Inside the try: getAccessToken() throws on missing credentials or a failed token
+        // exchange, and callers are promised a structured error result rather than a
+        // protocol-level throw.
+        const token = await getAccessToken();
         let response;
         log('info', `Tool called: ${name}`, args);
 

@@ -1,11 +1,11 @@
 import os
-import sys
 import json
 import re
 import time
 import threading
 import mimetypes
 import requests
+from urllib.parse import quote, quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
@@ -34,12 +34,21 @@ _session.mount('http://', HTTPAdapter(max_retries=_retry))
 _log_file = os.getenv('PIXELZ_LOG_FILE')
 
 def redact_secrets(text):
-    """Replace known credential values and bearer tokens in text with <REDACTED>."""
+    """Replace known credential values and bearer tokens in text with <REDACTED>.
+
+    Credentials are matched in raw AND percent-encoded form. Automation creds travel in a
+    form-encoded POST body, so they appear percent-encoded wherever requests echoes that
+    body or a redirected URL, and a literal match would silently miss them. The param-name
+    pass is the backstop for any encoding these variants don't anticipate.
+    """
     s = str(text)
     for key in ('PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'):
         val = os.getenv(key)
-        if val:
-            s = s.replace(val, '<REDACTED>')
+        if not val:
+            continue
+        for variant in {val, quote(val, safe=''), quote_plus(val)}:
+            s = s.replace(variant, '<REDACTED>')
+    s = re.sub(r'(client_id|client_secret)=[^&\s\'"]*', r'\1=<REDACTED>', s, flags=re.IGNORECASE)
     s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
     return s
 

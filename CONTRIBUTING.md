@@ -33,6 +33,21 @@ python -m pytest tests/python/ -v
 
 Tests run automatically on every push and pull request via GitHub Actions.
 
+## Running the linters
+
+**Python (ruff)** — correctness rules only (`E9`, `F`, `B`); see `ruff.toml`:
+```bash
+ruff check .
+```
+
+**CLI tools (TypeScript `checkJs`)** — type-checks the plain-JS CLIs with no extra dependency:
+```bash
+cd tests/node && pnpm exec tsc -p tsconfig.clitools.json
+```
+
+Both run in CI. The ruff rule set is deliberately narrow: the default set flags well over a
+hundred import-ordering and style issues here, which would bury real defects in churn.
+
 ## Testing a change manually
 
 1. Copy `.env.example` to `.env` and add your credentials.
@@ -45,6 +60,12 @@ Tests run automatically on every push and pull request via GitHub Actions.
 Every component exists in both Node.js and Python. When you change behaviour in one language, apply the equivalent change in the other. This applies to:
 - `mcp-servers/platform/` and `mcp-servers/automation/`
 - `cli-tools/platform/` and `cli-tools/automation/`
+
+Parity covers the *process* contract too, not just the API params — both language tracks must
+exit non-zero on failure, send diagnostics to stderr (stdout stays clean for JSON), and
+categorize errors with the same `[TIMEOUT]` / `[NETWORK_ERROR]` / `[HTTP_<status>]` /
+`[AUTH_ERROR]` prefixes. `tests/node/platform/cliContract.test.ts` asserts this against both
+languages; add to it rather than relying on review to catch a divergence.
 
 ### Auth Guard pattern
 All tools must check for credentials before making any API call and return a structured `[AUTH_ERROR]` message if they are missing. Never log or expose credential values.

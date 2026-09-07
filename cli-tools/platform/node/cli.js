@@ -31,8 +31,15 @@ function redactSecrets(text) {
     let s = String(text);
     for (const key of ['PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL']) {
         const val = process.env[key];
-        if (val) s = s.replaceAll(val, '<REDACTED>');
+        if (!val) continue;
+        // Match raw AND percent-encoded forms: a credential echoed back inside a URL
+        // appears encoded, where a literal match would silently miss it.
+        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val)])) {
+            s = s.replaceAll(variant, '<REDACTED>');
+        }
     }
+    // Backstop by param name, so an encoding the variants above miss still cannot leak.
+    s = s.replace(/(contactAPIkey|contactEmail)=[^&\s'"]*/gi, '$1=<REDACTED>');
     return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
 }
 
@@ -200,8 +207,10 @@ const commands = {
         checkApiError(res.data);
         console.log(JSON.stringify(res.data, null, 2));
     },
+    /** @param {Record<string, any>} options parsed --flags; keys mirror the API's param names */
     'list-images': async (options = {}) => {
         log('info', 'list-images', options);
+        /** @type {Record<string, any>} */
         const { status: _s, imageStatus: _is, excludeImageStatus: _es, ...rest } = options;
         if (rest.page) rest.page = parseInt(rest.page, 10);
         if (rest.imagesPerPage) rest.imagesPerPage = parseInt(rest.imagesPerPage, 10);

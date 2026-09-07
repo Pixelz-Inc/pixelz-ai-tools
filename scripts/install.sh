@@ -5,6 +5,20 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
+# NOTE: deliberately no `set -e` here. show_menu communicates the chosen index through its
+# exit status (`return $selected`, read back as $?), and `((selected--))` returns 1 when the
+# result is 0 — under `set -e` either would abort the installer mid-menu. Failure points are
+# guarded individually with `|| { echo ...; exit 1; }` instead.
+
+# Fail early with an actionable message rather than a bare "command not found" partway in.
+require_cmd() {
+    command -v "$1" &> /dev/null || {
+        echo "Error: '$1' is required for the $2 track but was not found on PATH."
+        echo "Install it and re-run this script."
+        exit 1
+    }
+}
+
 # Arrow Key Selection Function
 show_menu() {
     local title=$1
@@ -89,8 +103,17 @@ if [ $SCOPE_IDX -eq 1 ]; then
     AGENT_DIR="$TARGET_PATH/.$AGENT"
 fi
 
+# Verify the toolchain for the chosen language before doing any work
+if [ "$LANG_PREF" == "node" ]; then
+    require_cmd node "Node.js"
+    require_cmd pnpm "Node.js"
+else
+    require_cmd python3 "Python"
+    require_cmd pip "Python"
+fi
+
 # Create agent config dir
-mkdir -p "$AGENT_DIR"
+mkdir -p "$AGENT_DIR" || { echo "Error: Failed to create '$AGENT_DIR'."; exit 1; }
 
 clear
 echo -e "\033[36mPixelz AI Tools Installer\033[0m"
@@ -192,9 +215,14 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
     echo "Installing AI Agent Skills Track..."
 
     if $LOCAL_INSTALL; then
-        # Copy CLI tools to the local target so skills can invoke them from there
-        mkdir -p "$TARGET_PATH/cli-tools"
-        cp -r "$PROJECT_ROOT/cli-tools/." "$TARGET_PATH/cli-tools/"
+        # Copy CLI tools to the local target so skills can invoke them from there.
+        # Only the selected language's tree — the skills are patched to one language, so
+        # shipping the other is dead weight the user would have to trust and update.
+        for api in platform automation; do
+            mkdir -p "$TARGET_PATH/cli-tools/$api/$LANG_PREF"
+            cp -r "$PROJECT_ROOT/cli-tools/$api/$LANG_PREF/." "$TARGET_PATH/cli-tools/$api/$LANG_PREF/" \
+                || { echo "Error: Failed to copy $api CLI tools."; exit 1; }
+        done
 
         if [ "$LANG_PREF" == "node" ]; then
             cp "$PROJECT_ROOT/package.json" "$TARGET_PATH/package.json"
@@ -237,21 +265,49 @@ elif [ "$TRACK_CHOICE" == "2" ]; then
     fi
 
     mkdir -p "$AGENT_DIR/skills"
-    cp -r skills/* "$AGENT_DIR/skills/"
+    # Remove previously deployed Pixelz skills first, so skills dropped upstream don't
+    # linger in the agent's directory across reinstalls.
+    for d in "$PROJECT_ROOT"/skills/*/; do
+        rm -rf "$AGENT_DIR/skills/$(basename "$d")"
+    done
+    cp -r "$PROJECT_ROOT"/skills/* "$AGENT_DIR/skills/"
 
-    # Patch CLI commands in copied skills to match the selected language
-    if [ "$LANG_PREF" == "python" ]; then
-        find "$AGENT_DIR/skills" -name "SKILL.md" | while read -r f; do
-            tmp=$(mktemp)
-            sed \
-                -e 's|node cli-tools/automation/node/cli\.js|python3 cli-tools/automation/python/cli.py|g' \
-                -e 's|node cli-tools/platform/node/cli\.js|python3 cli-tools/platform/python/cli.py|g' \
-                "$f" > "$tmp" && mv "$tmp" "$f"
-        done
-        echo "Skills patched to use Python CLI."
+    # Rewrite each skill's CLI command to an ABSOLUTE path, and to the chosen language.
+    #
+    # Skills are read by the agent and run in the agent's working directory — the user's
+    # own project — not in this repo. The relative `cli-tools/...` path in the source
+    # SKILL.md therefore resolves only when cwd happens to be the project root, so a
+    # global install produced "Cannot find module" for every skill. CLI_ROOT is wherever
+    # cli-tools actually landed for this install scope.
+    if [ "$LOCAL_INSTALL" == "true" ]; then
+        CLI_ROOT="$TARGET_PATH/cli-tools"
+    else
+        CLI_ROOT="$PROJECT_ROOT/cli-tools"
     fi
 
+    if [ "$LANG_PREF" == "python" ]; then
+        NEW_PLATFORM="python3 $CLI_ROOT/platform/python/cli.py"
+        NEW_AUTOMATION="python3 $CLI_ROOT/automation/python/cli.py"
+    else
+        NEW_PLATFORM="node $CLI_ROOT/platform/node/cli.js"
+        NEW_AUTOMATION="node $CLI_ROOT/automation/node/cli.js"
+    fi
+
+    # Escape the replacement for sed: & means "whole match", and \ and | are special here.
+    sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+    SED_PLATFORM="$(sed_escape "$NEW_PLATFORM")"
+    SED_AUTOMATION="$(sed_escape "$NEW_AUTOMATION")"
+
+    find "$AGENT_DIR/skills" -name "SKILL.md" | while read -r f; do
+        tmp=$(mktemp)
+        sed \
+            -e "s|node cli-tools/automation/node/cli\.js|$SED_AUTOMATION|g" \
+            -e "s|node cli-tools/platform/node/cli\.js|$SED_PLATFORM|g" \
+            "$f" > "$tmp" && mv "$tmp" "$f"
+    done
+
     echo "Skills deployed to: $AGENT_DIR/skills"
+    echo "Skills invoke the CLI at: $CLI_ROOT"
 fi
 
 echo ""
