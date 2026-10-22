@@ -83,8 +83,10 @@ AGENT_IDX=$?
 case $AGENT_IDX in
     0) AGENT="gemini"; AGENT_DIR="$HOME/.gemini" ;;
     1) AGENT="claude"; AGENT_DIR="$HOME/.claude" ;;
-    2) AGENT="windsurf"; AGENT_DIR="$HOME/.windsurf" ;;
-    3) AGENT="opencode"; AGENT_DIR="$HOME/.opencode" ;;
+    # Windsurf (now Devin Desktop) and OpenCode never read ~/.windsurf or ~/.opencode; these are
+    # their documented global skill roots (docs.devin.ai/desktop/cascade/skills, opencode.ai/docs/skills).
+    2) AGENT="windsurf"; AGENT_DIR="$HOME/.codeium/windsurf" ;;
+    3) AGENT="opencode"; AGENT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" ;;
 esac
 
 # 4. Scope Preference
@@ -205,10 +207,25 @@ EOF
             echo "Config written to: $CONFIG_FILE"
             echo "Merge the 'mcpServers' entries into your Gemini MCP config."
         fi
-    else
-        # Windsurf, OpenCode — JSON config only
+    elif [ "$AGENT" == "opencode" ]; then
+        # OpenCode ignores `mcpServers`: it reads `mcp` entries of type "local", with the
+        # command and its arguments as a single array (opencode.ai/docs/mcp-servers).
+        cat > "$CONFIG_FILE" <<EOF
+{
+  "mcp": {
+    "pixelz-platform":   { "type": "local", "command": ["$MCP_CMD", "$PLATFORM_PATH"],   "enabled": true },
+    "pixelz-automation": { "type": "local", "command": ["$MCP_CMD", "$AUTOMATION_PATH"], "enabled": true }
+  }
+}
+EOF
         echo "MCP config written to: $CONFIG_FILE"
-        echo "Next step: merge its 'mcpServers' entries into your agent's MCP config file."
+        echo "Next step: merge its 'mcp' entries into ~/.config/opencode/opencode.json"
+        echo "(or opencode.json in your project)."
+    else
+        # Windsurf / Devin Desktop has no CLI to register servers and no project-level MCP file.
+        echo "MCP config written to: $CONFIG_FILE"
+        echo "Next step: merge its 'mcpServers' entries into ~/.config/devin/mcp_config.json"
+        echo "(Devin Desktop) or ~/.codeium/windsurf/mcp_config.json (older Windsurf builds)."
     fi
 
 elif [ "$TRACK_CHOICE" == "2" ]; then

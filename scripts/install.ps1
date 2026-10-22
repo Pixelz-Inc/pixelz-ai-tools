@@ -47,8 +47,10 @@ $agentIdx = Show-Menu "Select AI Agent:" @("Gemini", "Claude", "Windsurf", "Open
 switch ($agentIdx) {
     0 { $agent = "gemini";   $agentDir = "$HOME\.gemini" }
     1 { $agent = "claude";   $agentDir = "$HOME\.claude" }
-    2 { $agent = "windsurf"; $agentDir = "$HOME\.windsurf" }
-    3 { $agent = "opencode"; $agentDir = "$HOME\.opencode" }
+    # Windsurf (now Devin Desktop) and OpenCode never read ~\.windsurf or ~\.opencode; these are
+    # their documented global skill roots (docs.devin.ai/desktop/cascade/skills, opencode.ai/docs/skills).
+    2 { $agent = "windsurf"; $agentDir = "$HOME\.codeium\windsurf" }
+    3 { $agent = "opencode"; $agentDir = "$HOME\.config\opencode" }
 }
 
 # 4. Scope Preference
@@ -199,10 +201,24 @@ if ($trackChoice -eq 1) {
             Write-Host "Config written to: $configFile"
             Write-Host "Merge the 'mcpServers' entries into your Gemini MCP config."
         }
-    } else {
-        # Windsurf, OpenCode — JSON config only
+    } elseif ($agent -eq "opencode") {
+        # OpenCode ignores `mcpServers`: it reads `mcp` entries of type "local", with the
+        # command and its arguments as a single array (opencode.ai/docs/mcp-servers).
+        $openCodeConfig = [ordered]@{
+            mcp = [ordered]@{
+                "pixelz-platform"   = [ordered]@{ type = "local"; command = @($mcpCmd, $platformPath);   enabled = $true }
+                "pixelz-automation" = [ordered]@{ type = "local"; command = @($mcpCmd, $automationPath); enabled = $true }
+            }
+        }
+        $openCodeConfig | ConvertTo-Json -Depth 5 | Out-File $configFile -Encoding UTF8
         Write-Host "MCP config written to: $configFile"
-        Write-Host "Next step: merge its 'mcpServers' entries into your agent's MCP config file."
+        Write-Host "Next step: merge its 'mcp' entries into $HOME\.config\opencode\opencode.json"
+        Write-Host "(or opencode.json in your project)."
+    } else {
+        # Windsurf / Devin Desktop has no CLI to register servers and no project-level MCP file.
+        Write-Host "MCP config written to: $configFile"
+        Write-Host "Next step: merge its 'mcpServers' entries into $env:APPDATA\devin\mcp_config.json"
+        Write-Host "(Devin Desktop) or $HOME\.codeium\windsurf\mcp_config.json (older Windsurf builds)."
     }
 
 } elseif ($trackChoice -eq 2) {

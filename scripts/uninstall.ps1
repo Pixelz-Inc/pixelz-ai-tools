@@ -11,8 +11,9 @@ $agentChoice = Read-Host "Choice (1-4)"
 switch ($agentChoice) {
     "1" { $agent = "gemini"; $agentDir = "$HOME\.gemini" }
     "2" { $agent = "claude"; $agentDir = "$HOME\.claude" }
-    "3" { $agent = "windsurf"; $agentDir = "$HOME\.windsurf" }
-    "4" { $agent = "opencode"; $agentDir = "$HOME\.opencode" }
+    # Keep in step with install.ps1's $agentDir mapping.
+    "3" { $agent = "windsurf"; $agentDir = "$HOME\.codeium\windsurf" }
+    "4" { $agent = "opencode"; $agentDir = "$HOME\.config\opencode" }
     Default { Write-Error "Invalid choice"; Pop-Location; exit 1 }
 }
 
@@ -34,8 +35,12 @@ if ($scopePref -eq "local") {
 
 if (Test-Path $agentDir) {
     Write-Host "Cleaning up $agentDir..." -ForegroundColor Green
+    # Only Pixelz's own skills: the agent's skills dir also holds the user's other skills.
     $skillsDir = Join-Path $agentDir "skills"
-    if (Test-Path $skillsDir) { Remove-Item -Path $skillsDir -Recurse -Force }
+    Get-ChildItem -Path (Join-Path $ProjectRoot "skills") -Directory | ForEach-Object {
+        $installed = Join-Path $skillsDir $_.Name
+        if (Test-Path $installed) { Remove-Item -Path $installed -Recurse -Force }
+    }
     $configFile = Join-Path $agentDir "pixelz_config.json"
     if (Test-Path $configFile) { Remove-Item -Path $configFile -Force }
     Write-Host "Agent config cleaned."

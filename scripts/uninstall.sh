@@ -13,8 +13,9 @@ read -p "Choice (1-4): " AGENT_CHOICE
 case $AGENT_CHOICE in
     1) AGENT="gemini"; AGENT_DIR="$HOME/.gemini" ;;
     2) AGENT="claude"; AGENT_DIR="$HOME/.claude" ;;
-    3) AGENT="windsurf"; AGENT_DIR="$HOME/.windsurf" ;;
-    4) AGENT="opencode"; AGENT_DIR="$HOME/.opencode" ;;
+    # Keep in step with install.sh's AGENT_DIR mapping.
+    3) AGENT="windsurf"; AGENT_DIR="$HOME/.codeium/windsurf" ;;
+    4) AGENT="opencode"; AGENT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" ;;
     *) echo "Invalid agent"; exit 1 ;;
 esac
 
@@ -35,7 +36,10 @@ fi
 
 if [ -d "$AGENT_DIR" ]; then
     echo "Cleaning up $AGENT_DIR..."
-    rm -rf "$AGENT_DIR/skills"
+    # Only Pixelz's own skills: the agent's skills dir also holds the user's other skills.
+    for d in "$PROJECT_ROOT"/skills/*/; do
+        rm -rf "$AGENT_DIR/skills/$(basename "$d")"
+    done
     rm -f "$AGENT_DIR/pixelz_config.json"
     echo "Agent config cleaned."
 else

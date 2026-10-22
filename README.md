@@ -59,7 +59,7 @@ Every skill and tool is optimized for AI reliability:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/niclas-pix/pixelz-ai-tools.git
+git clone https://github.com/Pixelz-Inc/pixelz-ai-tools.git
 cd pixelz-ai-tools
 ```
 
@@ -99,7 +99,14 @@ You only need keys for the API(s) you intend to use (Platform, Automation, or bo
 
 ## Manual MCP Setup (Windsurf / OpenCode)
 
-After the installer runs, it places a `pixelz_config.json` in your agent's config directory. Merge its `mcpServers` entries into your agent's MCP configuration file. Refer to your agent's documentation for the exact location.
+After the installer runs, it places a `pixelz_config.json` in your agent's config directory. Merge its entries into your agent's MCP configuration file:
+
+| Agent | `pixelz_config.json` location | Merge into | Key |
+|---|---|---|---|
+| Windsurf / Devin Desktop | `~/.codeium/windsurf/` | `~/.config/devin/mcp_config.json` (Windows: `%APPDATA%\devin\mcp_config.json`); older Windsurf builds: `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
+| OpenCode | `~/.config/opencode/` | `~/.config/opencode/opencode.json`, or `opencode.json` in your project | `mcp` (OpenCode's own format — the installer writes it in that shape) |
+
+Skills for these agents are installed to `~/.codeium/windsurf/skills` and `~/.config/opencode/skills` (or `.windsurf/skills` / `.opencode/skills` for a local install).
 
 ---
 
