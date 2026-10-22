@@ -2,16 +2,19 @@
 
 ## Prerequisites
 
-- Node.js v18+
+- Node.js v22+
 - Python v3.10+
-- npm and pip
+- pnpm v11+ and pip
+
+Use pnpm, not npm: the supply-chain settings (7-day release quarantine, no install scripts,
+exact pins) live in `pnpm-workspace.yaml`, which npm ignores.
 
 ## Building locally
 
 **MCP Servers (Node.js — TypeScript):**
 ```bash
-cd mcp-servers/platform/node && npm install && npm run build
-cd mcp-servers/automation/node && npm install && npm run build
+cd mcp-servers/platform/node && pnpm install && pnpm run build
+cd mcp-servers/automation/node && pnpm install && pnpm run build
 ```
 
 **MCP Servers (Python):** No build step — run directly with `python server.py`.
@@ -20,9 +23,11 @@ cd mcp-servers/automation/node && npm install && npm run build
 
 ## Running tests
 
-**Node.js (Vitest):**
+**Node.js (Vitest):** needs the root `pnpm install`, both MCP servers built, and the Python CLI
+dependencies installed first — the suite spawns both CLIs and imports the built servers. See the
+README's Testing section for the full one-time setup.
 ```bash
-cd tests/node && npm install && npx vitest run
+cd tests/node && pnpm install && pnpm exec vitest run
 ```
 
 **Python (pytest):**
@@ -71,16 +76,25 @@ languages; add to it rather than relying on review to catch a divergence.
 All tools must check for credentials before making any API call and return a structured `[AUTH_ERROR]` message if they are missing. Never log or expose credential values.
 
 ### `.env` path resolution
-All tools load credentials from the root `.env` file. The `PIXELZ_DOTENV_PATH` environment variable can override the default path — this is used by the test suite and by Skills track installations where CLI tools may be copied to a different directory.
+All tools load credentials from the `.env` three directories above their own file, which is the repository root (or `<project>/.pixelz/.env` for a local Skills install, where the CLI tools are copied into `.pixelz/cli-tools`). The `PIXELZ_DOTENV_PATH` environment variable overrides the path — the test suite uses it, and local MCP installs set it so the servers read the project's `.pixelz/.env`.
 
 ### Transparent file handling
-Any tool that accepts an image input must silently detect local file paths, upload them to S3 via a presigned URL, and pass the resulting download URL (Platform) or file ID (Automation) to the API. The caller should never need to handle this.
+Any tool that accepts an image input must silently detect local file paths, upload them to S3 via a presigned URL, and pass the resulting URL to the API (the DownloadUrl for Platform, the presigned upload URL for Automation). The caller should never need to handle this.
 
 ### Input validation
 Node.js MCP servers validate all tool arguments at runtime using Zod schemas. If you add a new tool or modify parameters, update the corresponding schema.
 
 ### CLI flag syntax
 Both `--key=value` and `--key value` (space-separated) must be supported. The Node CLI `parseArgs()` function handles this; preserve that behaviour.
+
+### Installers and agents
+`scripts/install.*` and `scripts/uninstall.*` own the menus and dependency installs only. Everything
+that touches an AI agent's config — where its skills and MCP config live, merging our entries into
+the user's files, removing them again — is in `scripts/agent-config.mjs` and its Python twin
+`scripts/agent_config.py`, driven by `scripts/agents.json`. To support a new agent, add an entry to
+`agents.json`; `tests/node/installer/agentConfig.test.ts` then covers it for both helpers. Never write
+agent config files from the shell scripts: Windows PowerShell 5.1 adds a byte-order mark, and the
+helpers are what keeps the user's existing settings intact.
 
 ### Skill files
 When adding a new API endpoint, add a corresponding `SKILL.md` in `skills/<api>-<method>/`. Every skill must include: command, detailed parameters, why to use it, async job tracking instructions (if applicable), and success criteria.

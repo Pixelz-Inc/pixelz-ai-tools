@@ -8,19 +8,29 @@ cd "$PROJECT_ROOT"
 echo "Pixelz AI Tools Uninstaller"
 echo "========================="
 
-echo "Select AI Agent to uninstall for: 1) Gemini, 2) Claude, 3) Windsurf, 4) OpenCode"
-read -p "Choice (1-4): " AGENT_CHOICE
-case $AGENT_CHOICE in
-    1) AGENT="gemini"; AGENT_DIR="$HOME/.gemini" ;;
-    2) AGENT="claude"; AGENT_DIR="$HOME/.claude" ;;
-    # Keep in step with install.sh's AGENT_DIR mapping.
-    3) AGENT="windsurf"; AGENT_DIR="$HOME/.codeium/windsurf" ;;
-    4) AGENT="opencode"; AGENT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" ;;
-    *) echo "Invalid agent"; exit 1 ;;
-esac
+# The agent helper exists in both languages; use whichever runtime is available.
+if command -v node &> /dev/null; then
+    HELPER=(node "$SCRIPT_DIR/agent-config.mjs")
+elif command -v python3 &> /dev/null; then
+    HELPER=(python3 "$SCRIPT_DIR/agent_config.py")
+else
+    echo "Error: Node.js or Python 3 is required to run the uninstaller."; exit 1
+fi
+
+AGENT_IDS=(); i=0
+while IFS=$'\t' read -r id label; do
+    i=$((i + 1)); AGENT_IDS+=("$id")
+    echo "  $i) ${label%$'\r'}"
+done < <("${HELPER[@]}" list)
+read -p "Select AI Agent to uninstall for (1-$i): " AGENT_CHOICE
+if ! [[ "$AGENT_CHOICE" =~ ^[0-9]+$ ]] || [ "$AGENT_CHOICE" -lt 1 ] || [ "$AGENT_CHOICE" -gt $i ]; then
+    echo "Invalid agent"; exit 1
+fi
+AGENT="${AGENT_IDS[$((AGENT_CHOICE - 1))]}"
 
 read -p "Uninstall from (global/local): " SCOPE_PREF
 LOCAL_INSTALL=false
+SCOPE_ARGS=(--scope global)
 if [ "$SCOPE_PREF" == "local" ]; then
     LOCAL_INSTALL=true
     read -p "Enter local target directory path: " TARGET_PATH
@@ -31,31 +41,31 @@ if [ "$SCOPE_PREF" == "local" ]; then
         echo "Directory not found: $TARGET_PATH"; exit 1
     fi
     TARGET_PATH="$(cd "$TARGET_PATH" && pwd)"
-    AGENT_DIR="$TARGET_PATH/.$AGENT"
+    SCOPE_ARGS=(--scope local --target "$TARGET_PATH")
 fi
 
-if [ -d "$AGENT_DIR" ]; then
-    echo "Cleaning up $AGENT_DIR..."
-    # Only Pixelz's own skills: the agent's skills dir also holds the user's other skills.
-    for d in "$PROJECT_ROOT"/skills/*/; do
-        rm -rf "$AGENT_DIR/skills/$(basename "$d")"
-    done
-    rm -f "$AGENT_DIR/pixelz_config.json"
-    echo "Agent config cleaned."
-else
-    echo "No installation found at $AGENT_DIR."
-fi
+# Both are safe to run whichever track was installed: each removes only Pixelz's own entries
+# (the two pixelz-* MCP servers, the skill folders named in skills/) and leaves the rest.
+"${HELPER[@]}" unregister-mcp --agent "$AGENT" "${SCOPE_ARGS[@]}"
+"${HELPER[@]}" remove-skills --agent "$AGENT" "${SCOPE_ARGS[@]}" --src "$PROJECT_ROOT/skills"
 
-# For local installs, also remove the CLI tools and pnpm/pip files that were copied in.
-# Keep this list in step with what install.sh copies into $TARGET_PATH.
 if $LOCAL_INSTALL; then
-    for item in cli-tools node_modules package.json pnpm-lock.yaml pnpm-workspace.yaml requirements.txt; do
-        target="$TARGET_PATH/$item"
-        if [ -e "$target" ]; then
-            echo "Removing $target..."
-            rm -rf "$target"
-        fi
+    if [ -d "$TARGET_PATH/.pixelz" ]; then
+        echo "Removing $TARGET_PATH/.pixelz (CLI tools, dependencies and its .env)..."
+        rm -rf "$TARGET_PATH/.pixelz"
+    fi
+    # Installs before the .pixelz/ layout copied these into the project root. They may be the
+    # user's own files too, so they are listed rather than deleted.
+    LEGACY=()
+    for item in cli-tools node_modules package.json pnpm-lock.yaml pnpm-workspace.yaml requirements.txt .env; do
+        [ -e "$TARGET_PATH/$item" ] && LEGACY+=("$item")
     done
+    if [ ${#LEGACY[@]} -gt 0 ] && [ -d "$TARGET_PATH/cli-tools/platform" ]; then
+        echo ""
+        echo "NOTE: an older Pixelz install may have copied these into $TARGET_PATH:"
+        printf '  %s\n' "${LEGACY[@]}"
+        echo "Delete the ones that are not part of your own project."
+    fi
 fi
 
 echo "Uninstall complete."

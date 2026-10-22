@@ -1,0 +1,77 @@
+{
+  "_comment": [
+    "Where each AI agent reads Agent Skills and MCP servers; read by scripts/agent-config.mjs and scripts/agent_config.py.",
+    "Tokens: {home}, {target} (local install dir), {appdata}, {xdg_config} ($XDG_CONFIG_HOME or {home}/.config on every OS), {codex_home} ($CODEX_HOME or {home}/.codex), {copilot_home} ($COPILOT_HOME or {home}/.copilot).",
+    "A path may be split as {\"posix\": ..., \"win32\": ...}. MCP formats: mcpServers | copilot | opencode | codex-toml; \"cli\": \"claude\" registers through the Claude Code CLI, which owns ~/.claude.json.",
+    "legacy_* entries are locations older versions of these installers wrote to; uninstall cleans them up. Sources and verification dates: see README 'Supported agents'."
+  ],
+  "agents": {
+    "claude": {
+      "label": "Claude Code",
+      "skills": { "global": "{home}/.claude/skills", "local": "{target}/.claude/skills" },
+      "mcp": {
+        "global": { "cli": "claude" },
+        "local": { "file": "{target}/.mcp.json", "format": "mcpServers" }
+      },
+      "legacy_files": ["{home}/.claude/pixelz_config.json"]
+    },
+    "codex": {
+      "label": "OpenAI Codex",
+      "skills": { "global": "{home}/.agents/skills", "local": "{target}/.agents/skills" },
+      "mcp": {
+        "global": { "file": "{codex_home}/config.toml", "format": "codex-toml" },
+        "local": { "file": "{target}/.codex/config.toml", "format": "codex-toml", "note": "Codex loads a project's .codex/config.toml only after you mark the project as trusted." }
+      }
+    },
+    "copilot": {
+      "label": "GitHub Copilot (CLI and VS Code)",
+      "skills": { "global": "{copilot_home}/skills", "local": "{target}/.github/skills" },
+      "mcp": {
+        "global": { "file": "{copilot_home}/mcp-config.json", "format": "copilot" },
+        "local": { "file": "{target}/.github/mcp.json", "format": "copilot", "note": "Copilot loads project MCP servers only after you trust the folder." }
+      }
+    },
+    "cursor": {
+      "label": "Cursor",
+      "skills": { "global": "{home}/.cursor/skills", "local": "{target}/.cursor/skills" },
+      "mcp": {
+        "global": { "file": "{home}/.cursor/mcp.json", "format": "mcpServers" },
+        "local": { "file": "{target}/.cursor/mcp.json", "format": "mcpServers" }
+      }
+    },
+    "antigravity": {
+      "label": "Antigravity (formerly Gemini CLI)",
+      "skills": { "global": "{home}/.gemini/antigravity-cli/skills", "local": "{target}/.agents/skills" },
+      "mcp": {
+        "global": { "file": "{home}/.gemini/config/mcp_config.json", "format": "mcpServers" },
+        "local": { "file": "{target}/.agents/mcp_config.json", "format": "mcpServers" }
+      },
+      "legacy_skills": ["{home}/.gemini/skills"],
+      "legacy_mcp": [{ "file": "{home}/.gemini/settings.json", "format": "mcpServers" }],
+      "legacy_files": ["{home}/.gemini/pixelz_config.json"]
+    },
+    "windsurf": {
+      "label": "Windsurf / Devin Desktop",
+      "skills": { "global": "{home}/.codeium/windsurf/skills", "local": "{target}/.windsurf/skills" },
+      "mcp": {
+        "global": { "file": { "posix": "{xdg_config}/devin/mcp_config.json", "win32": "{appdata}/devin/mcp_config.json" }, "format": "mcpServers" }
+      },
+      "legacy_skills": ["{home}/.windsurf/skills"],
+      "legacy_files": ["{home}/.windsurf/pixelz_config.json", "{home}/.codeium/windsurf/pixelz_config.json"]
+    },
+    "opencode": {
+      "label": "OpenCode",
+      "skills": { "global": "{xdg_config}/opencode/skills", "local": "{target}/.opencode/skills" },
+      "mcp": {
+        "global": { "file": "{xdg_config}/opencode/opencode.json", "format": "opencode" },
+        "local": { "file": "{target}/opencode.json", "format": "opencode" }
+      },
+      "legacy_skills": ["{home}/.opencode/skills"],
+      "legacy_files": ["{home}/.opencode/pixelz_config.json", "{xdg_config}/opencode/pixelz_config.json"]
+    },
+    "universal": {
+      "label": "Universal skills folder (.agents/skills - read by Codex, Copilot, Cursor, OpenCode, Windsurf)",
+      "skills": { "global": "{home}/.agents/skills", "local": "{target}/.agents/skills" }
+    }
+  }
+}

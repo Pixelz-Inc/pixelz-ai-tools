@@ -1,6 +1,6 @@
 # Pixelz AI Tools
 
-Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your AI coding assistant. This monorepo provides integrations for **Claude Code**, **Gemini CLI**, **Windsurf**, and **OpenCode**, enabling automated image retouching workflows with zero-context security.
+Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your AI coding assistant. This monorepo provides integrations for **Claude Code**, **OpenAI Codex**, **GitHub Copilot**, **Cursor**, **Antigravity**, **Windsurf / Devin Desktop**, and **OpenCode** — plus a universal `.agents/skills` target — enabling automated image retouching workflows with zero-context security.
 
 ---
 
@@ -71,6 +71,7 @@ The installer walks you through choosing your language, track, and AI agent. It 
 ```powershell
 .\scripts\install.ps1
 ```
+If PowerShell refuses to run scripts, use `powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1`. Windows PowerShell 5.1 and PowerShell 7 both work.
 
 **Mac/Linux (Bash):**
 ```bash
@@ -80,33 +81,38 @@ chmod +x scripts/install.sh
 
 ### 3. Configure Credentials
 
-The installer creates a `.env` file from the included template. Open it and fill in your API keys:
+The installer creates a `.env` file from the included template and prints its location. Open it and fill in your API keys:
 
-- **Global install**: the `.env` is created in the project root (`pixelz-ai-tools/.env`).
-- **Local install**: the `.env` is created in your chosen target directory.
+- **Global install**: `pixelz-ai-tools/.env` (the repository root).
+- **Local install**: `<your project>/.pixelz/.env`.
 
 You only need keys for the API(s) you intend to use (Platform, Automation, or both).
 
 ### What the Installer Does
 
 1. Prompts you to choose a **language** (Node.js or Python), **track** (MCP or Skills), **AI agent**, and **install scope** (global or local).
-2. Installs dependencies and builds servers (MCP track) or deploys skill packages (Skills track).
+2. Installs dependencies and builds servers (MCP track), or deploys the 22 skills (Skills track).
 3. Creates the `.env` file from the template.
-4. **Claude and Gemini**: Registers MCP servers directly via their CLI — no manual configuration needed.
-5. **Windsurf and OpenCode**: Writes a `pixelz_config.json` file that you merge into your agent's MCP config.
+4. **Registers everything with your agent** — no manual config editing. MCP servers are added to the agent's own config file (or via `claude mcp add` for Claude Code). Your existing settings and servers are kept, the previous file is saved next to it as `<file>.pixelz-backup`, and a file the installer cannot parse (for example JSON with comments) is left untouched with the entries printed for you to paste.
 
----
+**Local installs** put everything they need — CLI tools, their dependencies, and the `.env` — in a single `.pixelz/` folder inside your project. Your own `package.json`, lockfile and `requirements.txt` are never touched, and `.pixelz/` ignores itself in git so the `.env` cannot be committed by accident.
 
-## Manual MCP Setup (Windsurf / OpenCode)
+### Supported Agents
 
-After the installer runs, it places a `pixelz_config.json` in your agent's config directory. Merge its entries into your agent's MCP configuration file:
+| Agent | Skills (global · local) | MCP servers (global · local) |
+|---|---|---|
+| Claude Code | `~/.claude/skills` · `.claude/skills` | `claude mcp add --scope user` · `.mcp.json` |
+| OpenAI Codex | `~/.agents/skills` · `.agents/skills` | `~/.codex/config.toml` · `.codex/config.toml` ¹ |
+| GitHub Copilot (CLI and VS Code) | `~/.copilot/skills` · `.github/skills` | `~/.copilot/mcp-config.json` · `.github/mcp.json` ¹ |
+| Cursor | `~/.cursor/skills` · `.cursor/skills` | `~/.cursor/mcp.json` · `.cursor/mcp.json` |
+| Antigravity (formerly Gemini CLI) | `~/.gemini/antigravity-cli/skills` · `.agents/skills` | `~/.gemini/config/mcp_config.json` · `.agents/mcp_config.json` |
+| Windsurf / Devin Desktop | `~/.codeium/windsurf/skills` · `.windsurf/skills` | `~/.config/devin/mcp_config.json` (Windows: `%APPDATA%\devin\mcp_config.json`) ² |
+| OpenCode | `~/.config/opencode/skills` · `.opencode/skills` | `~/.config/opencode/opencode.json` · `opencode.json` |
+| Universal (skills only) | `~/.agents/skills` · `.agents/skills` — read by Codex, Copilot, Cursor, OpenCode and Windsurf | — |
 
-| Agent | `pixelz_config.json` location | Merge into | Key |
-|---|---|---|---|
-| Windsurf / Devin Desktop | `~/.codeium/windsurf/` | `~/.config/devin/mcp_config.json` (Windows: `%APPDATA%\devin\mcp_config.json`); older Windsurf builds: `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
-| OpenCode | `~/.config/opencode/` | `~/.config/opencode/opencode.json`, or `opencode.json` in your project | `mcp` (OpenCode's own format — the installer writes it in that shape) |
+`~` is your home folder (`%USERPROFILE%` on Windows). ¹ The agent loads project-level servers only after you mark the project as trusted. ² Windsurf has no project-level MCP config, so a local install registers the servers for your user account (pointing at the project's `.env`).
 
-Skills for these agents are installed to `~/.codeium/windsurf/skills` and `~/.config/opencode/skills` (or `.windsurf/skills` / `.opencode/skills` for a local install).
+**Gemini CLI users:** Google moved individual users from Gemini CLI to Antigravity CLI on 2026-06-18, so the installer now targets Antigravity. Uninstalling for Antigravity also removes Pixelz entries an earlier version of this installer added to Gemini CLI.
 
 ---
 
@@ -122,6 +128,8 @@ pixelz-ai-tools/
 │   ├── platform/         #   Platform API CLI
 │   └── automation/       #   Automation API CLI
 ├── scripts/              # Interactive installers and uninstallers
+│   ├── agents.json       #   Where each AI agent reads skills and MCP config
+│   └── agent-config.mjs  #   Registers/unregisters with agents (Python twin: agent_config.py)
 ├── tests/                # Test suite
 │   ├── node/             #   Vitest tests for Node.js components
 │   └── python/           #   pytest tests for Python components
@@ -134,11 +142,17 @@ pixelz-ai-tools/
 ## Testing
 
 ```bash
-# Node.js
+# One-time setup: the Node suite spawns the CLIs (both languages) and imports the built servers
+pnpm install
+(cd mcp-servers/platform/node && pnpm install && pnpm run build)
+(cd mcp-servers/automation/node && pnpm install && pnpm run build)
+python -m pip install -r requirements.txt -r tests/python/requirements.txt \
+  -r mcp-servers/platform/python/requirements.txt -r mcp-servers/automation/python/requirements.txt
+
+# Node.js (includes the cross-language CLI and installer tests)
 cd tests/node && pnpm install && pnpm exec vitest run
 
 # Python
-pip install -r tests/python/requirements.txt
 python -m pytest tests/python/ -v
 ```
 
@@ -154,12 +168,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup.
 
 ## Uninstallation
 
-To remove deployed skills and configuration from your AI agent's directory:
-
 ```bash
 ./scripts/uninstall.sh    # Mac/Linux
 .\scripts\uninstall.ps1   # Windows
 ```
+
+The uninstaller removes only what Pixelz added: the two `pixelz-*` MCP servers from the agent's config, the 22 Pixelz skill folders (your other skills stay), and — for a local install — the project's `.pixelz/` folder. It also cleans up locations that earlier versions of the installer used.
 
 ---
 

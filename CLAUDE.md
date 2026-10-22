@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-Pixelz AI Tools connects the Pixelz Platform and Automation APIs to AI coding assistants (Claude Code, Gemini CLI, Windsurf, OpenCode). It exposes image retouching workflows via two integration tracks users choose between at install time.
+Pixelz AI Tools connects the Pixelz Platform and Automation APIs to AI coding assistants (Claude Code, OpenAI Codex, GitHub Copilot, Cursor, Antigravity,
+Windsurf / Devin Desktop, OpenCode). It exposes image retouching workflows via two integration tracks users choose between at install time.
 
 ## Build Commands
 
@@ -32,6 +33,9 @@ python cli-tools/automation/python/cli.py <command> [args]
 bash scripts/install.sh         # Interactive Mac/Linux installer
 pwsh scripts/install.ps1        # Interactive Windows installer
 ```
+The installers delegate all agent-config work to `scripts/agent-config.mjs` / `scripts/agent_config.py`
+(same behaviour, tested against each other), driven by `scripts/agents.json`. Local installs put
+everything in `<project>/.pixelz/`.
 
 ### Tests
 ```bash
