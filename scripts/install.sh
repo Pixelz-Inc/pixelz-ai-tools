@@ -82,7 +82,6 @@ show_menu "Choose Programming Language:" "Node.js" "Python"
 if [ $? -eq 0 ]; then
     LANG_PREF="node"; RUNTIME="node"
     require_cmd node "Node.js"
-    require_cmd pnpm "Node.js"
     HELPER=(node "$SCRIPT_DIR/agent-config.mjs")
 else
     LANG_PREF="python"; RUNTIME="python3"
@@ -150,7 +149,8 @@ if [ "$TRACK" == "mcp" ]; then
     echo "Installing MCP Server Track..."
 
     if [ "$LANG_PREF" == "node" ]; then
-        pnpm install --frozen-lockfile || { echo "Root pnpm install failed."; exit 1; }
+        # Only the MCP servers have npm dependencies (the SDK and zod); the CLIs have none.
+        require_cmd pnpm "Node.js MCP"
         (cd "$PROJECT_ROOT/mcp-servers/platform/node" && pnpm install --frozen-lockfile && pnpm run build) \
             || { echo "Platform MCP build failed."; exit 1; }
         (cd "$PROJECT_ROOT/mcp-servers/automation/node" && pnpm install --frozen-lockfile && pnpm run build) \
@@ -186,23 +186,15 @@ else
                 || { echo "Error: Failed to copy $api CLI tools."; exit 1; }
         done
 
-        if [ "$LANG_PREF" == "node" ]; then
-            # pnpm-workspace.yaml carries the supply-chain settings (7-day quarantine etc.).
-            for f in package.json pnpm-workspace.yaml pnpm-lock.yaml; do
-                cp "$PROJECT_ROOT/$f" "$PIXELZ_DIR/$f" || { echo "Error: Failed to copy $f."; exit 1; }
-            done
-            (cd "$PIXELZ_DIR" && pnpm install --frozen-lockfile --prod) \
-                || { echo "pnpm install in $PIXELZ_DIR failed."; exit 1; }
-        else
+        # The Node CLIs use only Node built-ins, so there is nothing to install for them.
+        if [ "$LANG_PREF" == "python" ]; then
             cp "$PROJECT_ROOT/requirements.txt" "$PIXELZ_DIR/requirements.txt"
             python3 -m pip install -r "$PIXELZ_DIR/requirements.txt" || { echo "pip install failed."; exit 1; }
         fi
         # The CLIs load .env from three levels above cli.js, i.e. $PIXELZ_DIR/.env.
         CLI_ROOT="$PIXELZ_DIR/cli-tools"
     else
-        if [ "$LANG_PREF" == "node" ]; then
-            pnpm install --frozen-lockfile || { echo "pnpm install failed."; exit 1; }
-        else
+        if [ "$LANG_PREF" == "python" ]; then
             python3 -m pip install -r requirements.txt || { echo "pip install failed."; exit 1; }
         fi
         CLI_ROOT="$PROJECT_ROOT/cli-tools"

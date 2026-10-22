@@ -8,7 +8,10 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    // Explicit: TypeScript no longer loads @types/* by default, and Node's typings used to
+    // arrive only as a side effect of axios/dotenv's own declarations.
+    "types": ["node"]
   },
   "include": ["src/**/*"]
 }

@@ -4,8 +4,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.stubEnv('NODE_ENV', 'test');
 vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
 
-// Mock dotenv to prevent file loading
-vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
 
 describe('Platform Auth — getAuthParams()', () => {
     beforeEach(() => {

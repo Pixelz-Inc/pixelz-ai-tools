@@ -13,7 +13,10 @@
     "moduleResolution": "node16",
     "target": "es2022",
     "strict": false,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // Explicit: TypeScript no longer loads @types/* by default, and Node's typings used to
+    // arrive only as a side effect of axios/dotenv's own declarations.
+    "types": ["node"]
   },
   "include": ["../../cli-tools/platform/node/cli.js", "../../cli-tools/automation/node/cli.js"]
 }

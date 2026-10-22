@@ -5,7 +5,6 @@ vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
 vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_ID', 'client123');
 vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_SECRET', 'secret456');
 
-vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
 
 describe('Automation — ensureUrlOrId()', () => {
     beforeEach(() => {

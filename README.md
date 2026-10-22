@@ -8,12 +8,12 @@ Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your 
 
 | Requirement | Version | Check |
 |-------------|---------|-------|
-| Node.js | v22 or higher | `node --version` |
-| pnpm | v11 or higher | `pnpm --version` |
+| Node.js | v22.21 or higher | `node --version` |
+| pnpm | v11 or higher — only for the Node.js MCP track | `pnpm --version` |
 | Python | v3.10 or higher | `python --version` |
 | pip | any recent version | `pip --version` |
 
-You only need Node.js **or** Python depending on your language choice during installation — not both.
+You only need Node.js **or** Python depending on your language choice during installation — not both. The Node.js CLI tools use only Node's built-ins (`fetch`, `process.loadEnvFile`), so the Node.js Skills track installs no packages at all.
 
 ---
 
@@ -143,7 +143,6 @@ pixelz-ai-tools/
 
 ```bash
 # One-time setup: the Node suite spawns the CLIs (both languages) and imports the built servers
-pnpm install
 (cd mcp-servers/platform/node && pnpm install && pnpm run build)
 (cd mcp-servers/automation/node && pnpm install && pnpm run build)
 python -m pip install --uploaded-prior-to P7D -r requirements.txt -r tests/python/requirements.txt \

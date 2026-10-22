@@ -81,10 +81,6 @@ jobs:
         env:
           # 7-day release quarantine for the transitive dependencies the requirements files don't pin.
           PIP_UPLOADED_PRIOR_TO: P7D
-      # cli-tools/*/node/cli.js resolves axios and dotenv from the repo root, so the
-      # root install is required before any test that spawns a CLI.
-      - name: Install root CLI dependencies
-        run: pnpm install --frozen-lockfile
       - name: Install MCP server dependencies
         run: |
           cd mcp-servers/platform/node && pnpm install --frozen-lockfile

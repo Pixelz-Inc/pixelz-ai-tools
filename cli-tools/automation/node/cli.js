@@ -1,9 +1,10 @@
-const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
-// quiet: dotenv >=17 prints an 'injected env' banner to STDOUT by default, which
-// corrupts the CLI's JSON output.
-require('dotenv').config({ quiet: true, path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../.env') });
+// Node's built-in .env loader (stable since 22.21). Like dotenv it never overrides variables
+// that are already set, and unlike dotenv it prints nothing to stdout (which carries JSON).
+// A missing file is fine: the credentials may come from the environment instead.
+const ENV_FILE = process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../.env');
+if (fs.statSync(ENV_FILE, { throwIfNoEntry: false })?.isFile()) process.loadEnvFile(ENV_FILE);
 
 // Overridable so tests can point at a local stub and assert the exact outgoing payload.
 const AUTH_URL = process.env.PIXELZ_AUTOMATION_AUTH_URL || 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
@@ -14,27 +15,87 @@ const MAX_RETRIES = 3;
 const RETRY_STATUS = new Set([429, 502, 503, 504]);
 // Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
 // it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
-const RETRY_METHODS = new Set(['get', 'head', 'options', 'put', 'delete']);
+const RETRY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
 
-const axiosRetry = axios.create();
-axiosRetry.interceptors.response.use(undefined, async (error) => {
-    const config = error.config;
-    if (!config) throw error;
-    config.__retryCount = config.__retryCount || 0;
-    const status = error.response?.status;
-    const isRetryable = RETRY_METHODS.has(config.method)
-        && (RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code));
-    if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
-    config.__retryCount++;
+// HTTP via Node's built-in fetch, shaped like the slice of axios this file used to rely on:
+// JSON in/out, a timeout, errors carrying .response / .code, and retries. No dependency, so the
+// CLI runs with nothing installed.
+class UploadFile {
+    /** @param {string} filePath */
+    constructor(filePath) { this.path = filePath; }
+}
+
+/** The OS error code behind a failed fetch, e.g. ECONNREFUSED; ECONNABORTED for our timeout. */
+function networkCode(err) {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') return 'ECONNABORTED';
+    // fetch reports socket failures as TypeError('fetch failed') with the code on .cause, or on
+    // .cause.errors[] when every address refused (seen on Windows for ECONNREFUSED).
+    return err.cause?.code ?? err.cause?.errors?.find(e => e.code)?.code;
+}
+
+async function readBody(res) {
+    const text = await res.text();
+    try { return text ? JSON.parse(text) : ''; } catch { return text; }
+}
+
+async function backoff(attempt, retryAfter) {
     // Retry-After may be an HTTP-date rather than seconds; anything non-numeric falls back to backoff.
-    const retryAfter = Number(error.response?.headers?.['retry-after']);
-    const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    const secs = retryAfter == null ? NaN : Number(retryAfter);
+    const delay = Number.isFinite(secs) ? secs * 1000 : Math.min(1000 * 2 ** attempt, 30000);
     await new Promise(r => setTimeout(r, delay));
-    // The first attempt consumed the upload stream; resending it would declare the full
-    // Content-Length but send zero bytes and hang until timeout.
-    if (config.data instanceof fs.ReadStream) config.data = fs.createReadStream(config.data.path);
-    return axiosRetry(config);
-});
+}
+
+/**
+ * @param {string} method
+ * @param {string} url
+ * @param {{ params?: Record<string, any>, body?: any, headers?: Record<string, string>, timeout?: number }} [opts]
+ */
+async function request(method, url, { params, body, headers = {}, timeout = REQUEST_TIMEOUT } = {}) {
+    if (params) url += (url.includes('?') ? '&' : '?') + new URLSearchParams(filterNull(params));
+    for (let attempt = 0; ; attempt++) {
+        const retryable = RETRY_METHODS.has(method) && attempt < MAX_RETRIES;
+        /** @type {Record<string, string>} */
+        const h = { ...headers };
+        let payload = body;
+        if (body instanceof UploadFile) {
+            // A Blob backed by the file: streamed from disk with the Content-Length S3 requires (a
+            // stream body would go out chunked), and safe to send again on a retry.
+            payload = await fs.openAsBlob(body.path);
+        } else if (body !== undefined && !(body instanceof URLSearchParams)) {
+            payload = JSON.stringify(body);
+            h['Content-Type'] = h['Content-Type'] || 'application/json';
+        }
+        let res;
+        try {
+            res = await fetch(url, { method, headers: h, body: payload, signal: AbortSignal.timeout(timeout) });
+        } catch (e) {
+            const code = networkCode(e);
+            if (retryable && (code === 'ECONNRESET' || code === 'ETIMEDOUT')) { await backoff(attempt, null); continue; }
+            // Deliberately no URL in the message: Platform credentials travel in the query string.
+            throw Object.assign(new Error(code ? `${e.message} (${code})` : e.message), { code, network: code !== 'ECONNABORTED' });
+        }
+        if (res.ok) return { status: res.status, data: await readBody(res) };
+        if (retryable && RETRY_STATUS.has(res.status)) {
+            const retryAfter = res.headers.get('retry-after');
+            await res.body?.cancel();
+            await backoff(attempt, retryAfter);
+            continue;
+        }
+        throw Object.assign(new Error(`Request failed with status code ${res.status}`),
+            { response: { status: res.status, data: await readBody(res) } });
+    }
+}
+
+const http = {
+    get: (url, opts = {}) => request('GET', url, opts),
+    post: (url, body, opts = {}) => request('POST', url, { ...opts, body }),
+    put: (url, body, opts = {}) => request('PUT', url, { ...opts, body }),
+    delete: (url, opts = {}) => request('DELETE', url, opts),
+};
+
+// fetch's timeout covers the whole request, where axios's was socket inactivity, so an upload's
+// limit must include the transfer itself. Assumes the link sustains at least 256 KB/s.
+const uploadTimeout = size => REQUEST_TIMEOUT + Math.ceil(size / (256 * 1024)) * 1000;
 
 function redactSecrets(text) {
     let s = String(text);
@@ -57,7 +118,12 @@ function log(level, message, data) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
     // Redacted here, not at call sites: error text can carry a credentialed request URL.
-    fs.appendFile(logFile, redactSecrets(entry), (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
+    // Synchronous: the CLI calls process.exit() on failure, which would drop a pending async write.
+    try {
+        fs.appendFileSync(logFile, redactSecrets(entry));
+    } catch (err) {
+        process.stderr.write('Log write failed: ' + err.message + '\n');
+    }
 }
 
 function validateId(value, name) {
@@ -94,7 +160,7 @@ Required: PIXELZ_AUTOMATION_CLIENT_ID and PIXELZ_AUTOMATION_CLIENT_SECRET in .en
                 params.append('client_id', clientId);
                 params.append('client_secret', clientSecret);
                 log('info', 'Requesting new OAuth token');
-                const res = await axiosRetry.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
+                const res = await http.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
                 tokenCache.token = res.data.access_token;
                 tokenCache.expiresAt = Date.now() + ((res.data.expires_in || 3600) - 60) * 1000;
                 return tokenCache.token;
@@ -121,14 +187,13 @@ async function ensureUrlOrId(input, token) {
     if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
     const fileName = path.basename(resolved);
     log('info', 'Requesting upload URL', { fileName });
-    const presignRes = await axiosRetry.post(`${BASE_URL}/files/request-upload-url`, { fileName }, {
+    const presignRes = await http.post(`${BASE_URL}/files/request-upload-url`, { fileName }, {
         headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
     });
     const uploadUrl = presignRes.data.url;
     const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
-    const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file', { fileName, size: fileSize });
-    await axiosRetry.put(uploadUrl, fileStream, { headers: { 'Content-Type': contentType, 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
+    await http.put(uploadUrl, new UploadFile(resolved), { headers: { 'Content-Type': contentType }, timeout: uploadTimeout(fileSize) });
     return uploadUrl;
 }
 
@@ -155,7 +220,7 @@ const commands = {
             trimap_url: options.trimap,
             callback_url: options.callback
         });
-        const res = await axiosRetry.post(`${BASE_URL}/images/remove-background`, payload, {
+        const res = await http.post(`${BASE_URL}/images/remove-background`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -169,7 +234,7 @@ const commands = {
             color_markers: JSON.parse(markersJson),
             callback_url: options.callback
         });
-        const res = await axiosRetry.post(`${BASE_URL}/images/color-matching`, payload, {
+        const res = await http.post(`${BASE_URL}/images/color-matching`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -184,7 +249,7 @@ const commands = {
             trimap_url: options.trimap,
             callback_url: options.callback
         });
-        const res = await axiosRetry.post(`${BASE_URL}/images/create-mask`, payload, {
+        const res = await http.post(`${BASE_URL}/images/create-mask`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -197,7 +262,7 @@ const commands = {
             image_url: urlOrId,
             callback_url: options.callback
         });
-        const res = await axiosRetry.post(`${BASE_URL}/images/create-trimap`, payload, {
+        const res = await http.post(`${BASE_URL}/images/create-trimap`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -212,7 +277,7 @@ const commands = {
             bottom_crop_location: options.bottom,
             callback_url: options.callback
         });
-        const res = await axiosRetry.post(`${BASE_URL}/images/model-crop`, payload, {
+        const res = await http.post(`${BASE_URL}/images/model-crop`, payload, {
             headers: makeHeaders(token, options.sync), timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -221,7 +286,7 @@ const commands = {
         validateId(jobId, 'jobId');
         log('info', 'status', { jobId });
         const token = await getAccessToken();
-        const res = await axiosRetry.get(`${BASE_URL}/images/jobs/${jobId}/status`, {
+        const res = await http.get(`${BASE_URL}/images/jobs/${jobId}/status`, {
             headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -229,7 +294,7 @@ const commands = {
     'get-key': async () => {
         log('info', 'get-key');
         const token = await getAccessToken();
-        const res = await axiosRetry.get(`${BASE_URL}/webhook/public-keys`, {
+        const res = await http.get(`${BASE_URL}/webhook/public-keys`, {
             headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
         });
         console.log(JSON.stringify(res.data, null, 2));
@@ -283,7 +348,7 @@ if (commands[cmd]) {
                 console.error(redactSecrets(`[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data, null, 2) : data}`));
             } else if (err.code === 'ECONNABORTED') {
                 console.error(`[TIMEOUT] Request timed out`);
-            } else if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
+            } else if (err.network) {
                 console.error(redactSecrets(`[NETWORK_ERROR] ${err.message}`));
             } else {
                 // Messages raised with their own category (e.g. [AUTH_ERROR]) keep it as-is.

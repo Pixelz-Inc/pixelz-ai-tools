@@ -1,17 +1,17 @@
 import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
 import type { jsonSchemaValidator, JsonSchemaValidatorResult } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
-import axios from "axios";
-import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from 'url';
 import { z } from "zod";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// quiet: dotenv >=17 prints an 'injected env' banner to STDOUT by default, which
-// corrupts the MCP stdio JSON-RPC stream and the CLI's JSON output.
-dotenv.config({ quiet: true, path: process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env') });
+// Node's built-in .env loader (stable since 22.21). Like dotenv it never overrides variables
+// that are already set, and unlike dotenv it prints nothing to stdout (which carries JSON).
+// A missing file is fine: the credentials may come from the environment instead.
+const ENV_FILE = process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env');
+if (fs.statSync(ENV_FILE, { throwIfNoEntry: false })?.isFile()) process.loadEnvFile(ENV_FILE);
 
 const AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
 const BASE_URL = 'https://automation-api.pixelz.com/v1';
@@ -21,27 +21,85 @@ const MAX_RETRIES = 3;
 const RETRY_STATUS = new Set([429, 502, 503, 504]);
 // Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
 // it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
-const RETRY_METHODS = new Set(['get', 'head', 'options', 'put', 'delete']);
+const RETRY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
 
-const axiosRetry = axios.create();
-axiosRetry.interceptors.response.use(undefined, async (error) => {
-    const config = error.config;
-    if (!config) throw error;
-    config.__retryCount = config.__retryCount || 0;
-    const status = error.response?.status;
-    const isRetryable = RETRY_METHODS.has(config.method)
-        && (RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code));
-    if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
-    config.__retryCount++;
+// HTTP via Node's built-in fetch, shaped like the slice of axios this file used to rely on:
+// JSON in/out, a timeout, errors carrying .response / .code, and retries.
+class UploadFile {
+    constructor(readonly path: string) {}
+}
+
+type RequestOptions = { params?: Record<string, any>; body?: any; headers?: Record<string, string>; timeout?: number };
+
+/** The OS error code behind a failed fetch, e.g. ECONNREFUSED; ECONNABORTED for our timeout. */
+function networkCode(err: any): string | undefined {
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') return 'ECONNABORTED';
+    // fetch reports socket failures as TypeError('fetch failed') with the code on .cause, or on
+    // .cause.errors[] when every address refused (seen on Windows for ECONNREFUSED).
+    return err.cause?.code ?? err.cause?.errors?.find((e: any) => e.code)?.code;
+}
+
+async function readBody(res: Response): Promise<any> {
+    const text = await res.text();
+    try { return text ? JSON.parse(text) : ''; } catch { return text; }
+}
+
+async function backoff(attempt: number, retryAfter: string | null) {
     // Retry-After may be an HTTP-date rather than seconds; anything non-numeric falls back to backoff.
-    const retryAfter = Number(error.response?.headers?.['retry-after']);
-    const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    const secs = retryAfter == null ? NaN : Number(retryAfter);
+    const delay = Number.isFinite(secs) ? secs * 1000 : Math.min(1000 * 2 ** attempt, 30000);
     await new Promise(r => setTimeout(r, delay));
-    // The first attempt consumed the upload stream; resending it would declare the full
-    // Content-Length but send zero bytes and hang until timeout.
-    if (config.data instanceof fs.ReadStream) config.data = fs.createReadStream(config.data.path);
-    return axiosRetry(config);
-});
+}
+
+async function request(method: string, url: string, { params, body, headers = {}, timeout = REQUEST_TIMEOUT }: RequestOptions = {}): Promise<{ status: number; data: any }> {
+    if (params) url += (url.includes('?') ? '&' : '?') + new URLSearchParams(filterNullParams(params));
+    for (let attempt = 0; ; attempt++) {
+        const retryable = RETRY_METHODS.has(method) && attempt < MAX_RETRIES;
+        const h: Record<string, string> = { ...headers };
+        let payload: any = body;
+        if (body instanceof UploadFile) {
+            // A Blob backed by the file: streamed from disk with the Content-Length S3 requires (a
+            // stream body would go out chunked), and safe to send again on a retry.
+            payload = await fs.openAsBlob(body.path);
+        } else if (body !== undefined && !(body instanceof URLSearchParams)) {
+            payload = JSON.stringify(body);
+            h['Content-Type'] = h['Content-Type'] || 'application/json';
+        }
+        let res: Response;
+        try {
+            res = await fetch(url, { method, headers: h, body: payload, signal: AbortSignal.timeout(timeout) });
+        } catch (e: any) {
+            const code = networkCode(e);
+            if (retryable && (code === 'ECONNRESET' || code === 'ETIMEDOUT')) { await backoff(attempt, null); continue; }
+            // Deliberately no URL in the message: Platform credentials travel in the query string.
+            throw Object.assign(new Error(code ? `${e.message} (${code})` : e.message), { code, network: code !== 'ECONNABORTED' });
+        }
+        if (res.ok) return { status: res.status, data: await readBody(res) };
+        if (retryable && RETRY_STATUS.has(res.status)) {
+            const retryAfter = res.headers.get('retry-after');
+            await res.body?.cancel();
+            await backoff(attempt, retryAfter);
+            continue;
+        }
+        throw Object.assign(new Error(`Request failed with status code ${res.status}`),
+            { response: { status: res.status, data: await readBody(res) } });
+    }
+}
+
+function filterNullParams(obj: Record<string, any>): Record<string, string> {
+    return Object.fromEntries(Object.entries(obj).filter(([_, v]) => v != null).map(([k, v]) => [k, String(v)]));
+}
+
+const http = {
+    get: (url: string, opts: RequestOptions = {}) => request('GET', url, opts),
+    post: (url: string, body: any, opts: RequestOptions = {}) => request('POST', url, { ...opts, body }),
+    put: (url: string, body: any, opts: RequestOptions = {}) => request('PUT', url, { ...opts, body }),
+    delete: (url: string, opts: RequestOptions = {}) => request('DELETE', url, opts),
+};
+
+// fetch's timeout covers the whole request, where axios's was socket inactivity, so an upload's
+// limit must include the transfer itself. Assumes the link sustains at least 256 KB/s.
+const uploadTimeout = (size: number) => REQUEST_TIMEOUT + Math.ceil(size / (256 * 1024)) * 1000;
 
 function redactSecrets(text: string): string {
     let s = text;
@@ -91,7 +149,7 @@ async function getAccessToken() {
                 params.append('client_id', clientId);
                 params.append('client_secret', clientSecret);
                 log('info', 'Requesting new OAuth token');
-                const response = await axiosRetry.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
+                const response = await http.post(AUTH_URL, params, { timeout: REQUEST_TIMEOUT });
                 tokenCache.token = response.data.access_token;
                 tokenCache.expiresAt = Date.now() + ((response.data.expires_in || 3600) - 60) * 1000;
                 return tokenCache.token!;
@@ -118,12 +176,11 @@ async function ensureUrlOrId(input: string, token: string) {
     if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
     const fileName = path.basename(resolved);
     log('info', 'Requesting upload URL', { fileName });
-    const presignRes = await axiosRetry.post(`${BASE_URL}/files/request-upload-url`, { fileName }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: REQUEST_TIMEOUT });
+    const presignRes = await http.post(`${BASE_URL}/files/request-upload-url`, { fileName }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: REQUEST_TIMEOUT });
     const uploadUrl = presignRes.data.url;
     const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
-    const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file', { fileName, size: fileSize });
-    await axiosRetry.put(uploadUrl, fileStream, { headers: { 'Content-Type': contentType, 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });
+    await http.put(uploadUrl, new UploadFile(resolved), { headers: { 'Content-Type': contentType }, timeout: uploadTimeout(fileSize) });
     return uploadUrl;
 }
 
@@ -291,7 +348,7 @@ async function callTool(name: string, args: any) {
                 if (p.backgroundColor && transparent) throw new Error('[VALIDATION_ERROR] backgroundColor and transparentBackground=true cannot be used together');
                 if (!p.backgroundColor && !transparent) throw new Error('[VALIDATION_ERROR] transparentBackground=false requires backgroundColor: set backgroundColor, or leave transparentBackground unset/true');
                 const rbUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axiosRetry.post(`${BASE_URL}/images/remove-background`, filterNull({
+                response = await http.post(`${BASE_URL}/images/remove-background`, filterNull({
                     image_url: rbUrl,
                     background_color: p.backgroundColor || undefined,
                     transparent_background: transparent,
@@ -304,7 +361,7 @@ async function callTool(name: string, args: any) {
             case "color_matching": {
                 const p = ColorMatchingSchema.parse(args);
                 const cmUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axiosRetry.post(`${BASE_URL}/images/color-matching`, filterNull({
+                response = await http.post(`${BASE_URL}/images/color-matching`, filterNull({
                     image_url: cmUrl,
                     color_markers: p.colorMarkers,
                     callback_url: p.callbackUrl
@@ -314,7 +371,7 @@ async function callTool(name: string, args: any) {
             case "create_mask": {
                 const p = CreateMaskSchema.parse(args);
                 const mUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axiosRetry.post(`${BASE_URL}/images/create-mask`, filterNull({
+                response = await http.post(`${BASE_URL}/images/create-mask`, filterNull({
                     image_url: mUrl,
                     feather_width: p.featherWidth,
                     trimap_url: p.trimapUrl,
@@ -325,7 +382,7 @@ async function callTool(name: string, args: any) {
             case "create_trimap": {
                 const p = CreateTrimapSchema.parse(args);
                 const tUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axiosRetry.post(`${BASE_URL}/images/create-trimap`, filterNull({
+                response = await http.post(`${BASE_URL}/images/create-trimap`, filterNull({
                     image_url: tUrl,
                     callback_url: p.callbackUrl
                 }), { headers: makeHeaders(p.sync === true), timeout: REQUEST_TIMEOUT });
@@ -334,7 +391,7 @@ async function callTool(name: string, args: any) {
             case "model_crop": {
                 const p = ModelCropSchema.parse(args);
                 const mcUrl = await ensureUrlOrId(p.imagePath, token);
-                response = await axiosRetry.post(`${BASE_URL}/images/model-crop`, filterNull({
+                response = await http.post(`${BASE_URL}/images/model-crop`, filterNull({
                     image_url: mcUrl,
                     top_crop_location: p.topCropLocation,
                     bottom_crop_location: p.bottomCropLocation,
@@ -346,12 +403,12 @@ async function callTool(name: string, args: any) {
                 const p = JobIdSchema.parse(args);
                 validateId(p.jobId, 'jobId');
                 const h: Record<string, string> = { 'Authorization': `Bearer ${token}` };
-                response = await axiosRetry.get(`${BASE_URL}/images/jobs/${p.jobId}/status`, { headers: h, timeout: REQUEST_TIMEOUT });
+                response = await http.get(`${BASE_URL}/images/jobs/${p.jobId}/status`, { headers: h, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "get_webhook_public_key": {
                 const h: Record<string, string> = { 'Authorization': `Bearer ${token}` };
-                response = await axiosRetry.get(`${BASE_URL}/webhook/public-keys`, { headers: h, timeout: REQUEST_TIMEOUT });
+                response = await http.get(`${BASE_URL}/webhook/public-keys`, { headers: h, timeout: REQUEST_TIMEOUT });
                 break;
             }
             default:
@@ -370,7 +427,7 @@ async function callTool(name: string, args: any) {
             errorMsg = `[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data) : data}`;
         } else if (error.code === 'ECONNABORTED') {
             errorMsg = `[TIMEOUT] Request timed out after ${REQUEST_TIMEOUT / 1000} seconds`;
-        } else if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+        } else if (error.network) {
             errorMsg = `[NETWORK_ERROR] ${error.message}`;
         } else {
             errorMsg = error.message;

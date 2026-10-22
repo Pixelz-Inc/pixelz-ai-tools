@@ -71,7 +71,6 @@ $langIdx = Show-Menu "Choose Programming Language:" @("Node.js", "Python")
 if ($langIdx -eq 0) {
     $langPref = "node"; $runtime = "node"
     Assert-Command "node" "Node.js"
-    Assert-Command "pnpm" "Node.js"
     $helperScript = Join-Path $ScriptDir "agent-config.mjs"
 } else {
     $langPref = "python"; $runtime = "python"
@@ -140,7 +139,8 @@ if ($track -eq "mcp") {
     Write-Host "Installing MCP Server Track..." -ForegroundColor Green
 
     if ($langPref -eq "node") {
-        Invoke-Checked "Root pnpm install" { pnpm install --frozen-lockfile }
+        # Only the MCP servers have npm dependencies (the SDK and zod); the CLIs have none.
+        Assert-Command "pnpm" "Node.js MCP"
         foreach ($api in @("platform", "automation")) {
             Push-Location (Join-Path $ProjectRoot "mcp-servers\$api\node")
             pnpm install --frozen-lockfile
@@ -178,26 +178,15 @@ if ($track -eq "mcp") {
             Copy-Item -Path (Join-Path $ProjectRoot "cli-tools\$api\$langPref\*") -Destination $langDest -Recurse -Force
         }
 
-        if ($langPref -eq "node") {
-            # pnpm-workspace.yaml carries the supply-chain settings (7-day quarantine etc.).
-            foreach ($f in @("package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml")) {
-                Copy-Item (Join-Path $ProjectRoot $f) (Join-Path $pixelzDir $f) -Force
-            }
-            Push-Location $pixelzDir
-            pnpm install --frozen-lockfile --prod
-            $installOk = $LASTEXITCODE
-            Pop-Location
-            if ($installOk -ne 0) { Stop-Install "pnpm install in $pixelzDir" }
-        } else {
+        # The Node CLIs use only Node built-ins, so there is nothing to install for them.
+        if ($langPref -eq "python") {
             Copy-Item (Join-Path $ProjectRoot "requirements.txt") (Join-Path $pixelzDir "requirements.txt") -Force
             Invoke-Checked "pip install" { python -m pip install -r (Join-Path $pixelzDir "requirements.txt") }
         }
         # The CLIs load .env from three levels above cli.js, i.e. .pixelz\.env.
         $cliRoot = Join-Path $pixelzDir "cli-tools"
     } else {
-        if ($langPref -eq "node") {
-            Invoke-Checked "pnpm install" { pnpm install --frozen-lockfile }
-        } else {
+        if ($langPref -eq "python") {
             Invoke-Checked "pip install" { python -m pip install -r requirements.txt }
         }
         $cliRoot = Join-Path $ProjectRoot "cli-tools"

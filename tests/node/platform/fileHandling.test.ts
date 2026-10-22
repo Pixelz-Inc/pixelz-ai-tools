@@ -5,7 +5,6 @@ vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
 vi.stubEnv('PIXELZ_PLATFORM_EMAIL', 'test@example.com');
 vi.stubEnv('PIXELZ_PLATFORM_API_KEY', 'key123');
 
-vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
 
 describe('Platform — ensureUrl()', () => {
     beforeEach(() => {

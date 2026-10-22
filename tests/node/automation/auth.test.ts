@@ -3,7 +3,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.stubEnv('NODE_ENV', 'test');
 vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
 
-vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
+
+/** Stub the global fetch the servers now use; each call gets a fresh Response (bodies are single-use). */
+function stubFetch(body: unknown, status = 200) {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response(JSON.stringify(body), { status })));
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+}
 
 describe('Automation Auth — getAccessToken()', () => {
     beforeEach(() => {
@@ -11,6 +17,7 @@ describe('Automation Auth — getAccessToken()', () => {
         vi.stubEnv('NODE_ENV', 'test');
         vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
         vi.resetModules();
+        vi.unstubAllGlobals();
     });
 
     it('throws AUTH_ERROR when credentials are missing', async () => {
@@ -25,20 +32,14 @@ describe('Automation Auth — getAccessToken()', () => {
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_ID', 'client123');
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_SECRET', 'secret456');
 
-        // Mock axios before importing the module so the module gets the mock
-        const mockPost = vi.fn().mockResolvedValue({
-            data: { access_token: 'token_abc', expires_in: 3600 },
-        });
-        const mockInstance = { post: mockPost, get: vi.fn(), put: vi.fn(), delete: vi.fn(), interceptors: { response: { use: vi.fn() } } };
-        vi.doMock('axios', () => ({
-            default: {
-                ...mockInstance,
-                create: vi.fn().mockReturnValue(mockInstance),
-            },
-        }));
+        const fetchMock = stubFetch({ access_token: 'token_abc', expires_in: 3600 });
 
         const mod = await import('../../../mcp-servers/automation/node/src/index.ts');
         const token = await mod.getAccessToken();
         expect(token).toBe('token_abc');
+        // The OAuth client-credentials exchange, form-encoded as Keycloak requires.
+        const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+        expect(url).toContain('/protocol/openid-connect/token');
+        expect(String(init.body)).toContain('grant_type=client_credentials');
     });
 });

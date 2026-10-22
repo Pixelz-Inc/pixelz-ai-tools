@@ -3,23 +3,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.stubEnv('NODE_ENV', 'test');
 vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
 
-vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
 
-function createAxiosMock(overrides: Record<string, any> = {}) {
-    const instance = {
-        post: vi.fn().mockResolvedValue({ data: { access_token: 'tok', expires_in: 3600 } }),
-        get: vi.fn(),
-        put: vi.fn(),
-        delete: vi.fn(),
-        interceptors: { response: { use: vi.fn() } },
-        ...overrides,
-    };
-    return {
-        default: {
-            ...instance,
-            create: vi.fn().mockReturnValue(instance),
-        },
-    };
+
+/** Stub the global fetch the servers now use; each call gets a fresh Response (bodies are single-use). */
+function stubFetch(body: unknown, status = 200) {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response(JSON.stringify(body), { status })));
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
 }
 
 describe('Automation — redactSecrets', () => {
@@ -30,10 +20,10 @@ describe('Automation — redactSecrets', () => {
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_ID', 'my_client_id');
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_SECRET', 'my_secret_value');
         vi.resetModules();
+        vi.unstubAllGlobals();
     });
 
     it('redacts client ID and secret from error messages', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/automation/node/src/index.ts');
         const result = mod.redactSecrets('Error: my_client_id failed with my_secret_value');
         expect(result).not.toContain('my_client_id');
@@ -42,7 +32,6 @@ describe('Automation — redactSecrets', () => {
     });
 
     it('redacts JWT tokens', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/automation/node/src/index.ts');
         const jwt = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_here';
         const result = mod.redactSecrets(`Bearer ${jwt}`);
@@ -59,14 +48,11 @@ describe('Automation — token caching', () => {
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_ID', 'client123');
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_SECRET', 'secret456');
         vi.resetModules();
+        vi.unstubAllGlobals();
     });
 
     it('caches token and reuses on second call', async () => {
-        const mockPost = vi.fn().mockResolvedValue({
-            data: { access_token: 'cached_token', expires_in: 3600 },
-        });
-        const mock = createAxiosMock({ post: mockPost });
-        vi.doMock('axios', () => mock);
+        const mockPost = stubFetch({ access_token: 'cached_token', expires_in: 3600 });
         const mod = await import('../../../mcp-servers/automation/node/src/index.ts');
         const token1 = await mod.getAccessToken();
         const token2 = await mod.getAccessToken();
@@ -76,11 +62,7 @@ describe('Automation — token caching', () => {
     });
 
     it('concurrent calls share a single token request', async () => {
-        const mockPost = vi.fn().mockResolvedValue({
-            data: { access_token: 'shared_token', expires_in: 3600 },
-        });
-        const mock = createAxiosMock({ post: mockPost });
-        vi.doMock('axios', () => mock);
+        const mockPost = stubFetch({ access_token: 'shared_token', expires_in: 3600 });
         const mod = await import('../../../mcp-servers/automation/node/src/index.ts');
         const [t1, t2, t3] = await Promise.all([
             mod.getAccessToken(),
@@ -102,10 +84,10 @@ describe('Automation — ensureUrlOrId validation', () => {
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_ID', 'client123');
         vi.stubEnv('PIXELZ_AUTOMATION_CLIENT_SECRET', 'secret456');
         vi.resetModules();
+        vi.unstubAllGlobals();
     });
 
     it('rejects non-regular files (e.g. directories)', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/automation/node/src/index.ts');
         // __dirname exists and is a directory, not a file
         await expect(mod.ensureUrlOrId('.', 'token')).rejects.toThrow('Not a regular file');

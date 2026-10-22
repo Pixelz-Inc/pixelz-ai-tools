@@ -3,24 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.stubEnv('NODE_ENV', 'test');
 vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
 
-vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
 
-function createAxiosMock(overrides: Record<string, any> = {}) {
-    const instance = {
-        post: vi.fn(),
-        get: vi.fn(),
-        put: vi.fn(),
-        delete: vi.fn(),
-        interceptors: { response: { use: vi.fn() } },
-        ...overrides,
-    };
-    return {
-        default: {
-            ...instance,
-            create: vi.fn().mockReturnValue(instance),
-        },
-    };
-}
 
 describe('Platform — redactSecrets', () => {
     beforeEach(() => {
@@ -33,7 +16,6 @@ describe('Platform — redactSecrets', () => {
     });
 
     it('redacts email and API key from error messages', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         const result = mod.redactSecrets('Auth failed for secret@example.com with key my_api_key_123');
         expect(result).not.toContain('secret@example.com');
@@ -53,13 +35,11 @@ describe('Platform — ensureUrl validation', () => {
     });
 
     it('rejects non-regular files (e.g. directories)', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         await expect(mod.ensureUrl('.')).rejects.toThrow('Not a regular file');
     });
 
     it('rejects nonexistent files', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         await expect(mod.ensureUrl('/nonexistent/file.jpg')).rejects.toThrow('Local file not found');
     });
@@ -76,13 +56,11 @@ describe('Platform — checkApiError', () => {
     });
 
     it('does not throw for NoError', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         expect(() => mod.checkApiError({ ErrorCode: 'NoError' })).not.toThrow();
     });
 
     it('throws for error codes', async () => {
-        vi.doMock('axios', () => createAxiosMock());
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         expect(() => mod.checkApiError({ ErrorCode: 'InvalidTemplate', Message: 'Not found' })).toThrow('API_ERROR');
     });

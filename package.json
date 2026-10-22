@@ -9,10 +9,6 @@
     "lint:python": "ruff check .",
     "lint:clitools": "cd tests/node && pnpm exec tsc -p tsconfig.clitools.json"
   },
-  "dependencies": {
-    "axios": "1.20.0",
-    "dotenv": "17.4.2"
-  },
   "keywords": [
     "pixelz",
     "mcp",
@@ -24,7 +20,7 @@
     "agent-skills"
   ],
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.21.0"
   },
   "author": "Pixelz",
   "license": "MIT",

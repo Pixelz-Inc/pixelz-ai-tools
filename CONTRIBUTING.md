@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js v22+
+- Node.js v22.21+ (`process.loadEnvFile` is stable from 22.21)
 - Python v3.10+
 - pnpm v11+ and pip
 
@@ -23,8 +23,8 @@ cd mcp-servers/automation/node && pnpm install && pnpm run build
 
 ## Running tests
 
-**Node.js (Vitest):** needs the root `pnpm install`, both MCP servers built, and the Python CLI
-dependencies installed first — the suite spawns both CLIs and imports the built servers. See the
+**Node.js (Vitest):** needs both MCP servers built and the Python CLI dependencies installed
+first — the suite spawns both CLIs and imports the built servers. See the
 README's Testing section for the full one-time setup.
 ```bash
 cd tests/node && pnpm install && pnpm exec vitest run
@@ -80,6 +80,12 @@ All tools load credentials from the `.env` three directories above their own fil
 
 ### Transparent file handling
 Any tool that accepts an image input must silently detect local file paths, upload them to S3 via a presigned URL, and pass the resulting URL to the API (the DownloadUrl for Platform, the presigned upload URL for Automation). The caller should never need to handle this.
+
+### No runtime dependencies in the CLIs
+The Node CLIs (and the HTTP/env code in the Node MCP servers) use only Node built-ins: `fetch` for
+HTTP, `fs.openAsBlob` for uploads, `process.loadEnvFile` for `.env`. Keep it that way — it is what
+lets the Skills track run with nothing installed. Each file carries its own small `request()`
+helper (retries, timeout, error categories) because local installs copy each CLI on its own.
 
 ### Input validation
 Node.js MCP servers validate all tool arguments at runtime using Zod schemas. If you add a new tool or modify parameters, update the corresponding schema.
