@@ -49,7 +49,7 @@ Users install **one track** at setup time:
 
 ### Track 1 — MCP Servers
 Native Model Context Protocol integration, implementing the **2026-07-28** specification via
-MCP SDK v2 (`@modelcontextprotocol/server` 2.0.0 / `mcp` 2.0.0). AI agents call Pixelz API
+MCP SDK v2 (`@modelcontextprotocol/server` 2.3.1 / `mcp` 2.3.0). AI agents call Pixelz API
 endpoints as tools directly. Two independent servers:
 - **Platform server** (`mcp-servers/platform/`): image CRUD, templates, white-glove, stack, invoices
 - **Automation server** (`mcp-servers/automation/`): background removal, color matching, masking, trimap, model crop, async job tracking

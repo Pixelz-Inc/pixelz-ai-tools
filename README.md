@@ -26,8 +26,8 @@ This toolkit offers two paths for integration. During installation, you choose *
 For AI agents that support the **Model Context Protocol (MCP)**. Exposes Pixelz endpoints as native tools the AI can call directly. Includes automatic local file handling, full parameter support, Zod input validation (Node.js), and real-time execution. Available in both **Node.js (TypeScript)** and **Python**.
 
 Both servers implement the **2026-07-28** MCP specification (stateless core, `server/discover`,
-cacheable list results) via MCP SDK v2 — `@modelcontextprotocol/server` 2.0.0 on Node.js and
-`mcp` 2.0.0 on Python. Clients still speaking a 2025-era revision are served unchanged through
+cacheable list results) via MCP SDK v2 — `@modelcontextprotocol/server` 2.3.1 on Node.js and
+`mcp` 2.3.0 on Python. Clients still speaking a 2025-era revision are served unchanged through
 the legacy `initialize` handshake, so older agent CLIs keep working without any config change.
 
 ### Track 2: AI Agent Skills (High-Reliability Instructions)
@@ -146,7 +146,7 @@ pixelz-ai-tools/
 pnpm install
 (cd mcp-servers/platform/node && pnpm install && pnpm run build)
 (cd mcp-servers/automation/node && pnpm install && pnpm run build)
-python -m pip install -r requirements.txt -r tests/python/requirements.txt \
+python -m pip install --uploaded-prior-to P7D -r requirements.txt -r tests/python/requirements.txt \
   -r mcp-servers/platform/python/requirements.txt -r mcp-servers/automation/python/requirements.txt
 
 # Node.js (includes the cross-language CLI and installer tests)

@@ -1,6 +1,8 @@
 # Pinned exactly — see the supply-chain policy in CLAUDE.md. An unpinned `mcp` is what
-# let the breaking 2.0.0 release reach fresh installs silently on 2026-07-28.
-mcp==2.0.0
+# let the breaking 2.0.0 release reach fresh installs silently on 2026-07-28. mcp's own
+# dependencies are not pinned here: install with pip's --uploaded-prior-to (the installers and
+# CI do) so they are held to the same 7-day quarantine.
+mcp==2.3.0
 python-dotenv==1.2.2
 requests==2.34.2
 # Imported directly (urllib3.util.retry.Retry) — pinned rather than relying on requests' transitive pin.

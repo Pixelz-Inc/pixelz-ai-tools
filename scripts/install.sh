@@ -91,6 +91,15 @@ else
     # tools will actually run with.
     python3 -m pip --version &> /dev/null || { echo "Error: pip is not available for python3."; exit 1; }
     HELPER=(python3 "$SCRIPT_DIR/agent_config.py")
+    # 7-day release quarantine, as pnpm-workspace.yaml does for Node. The requirements files pin
+    # only direct dependencies, so this is what holds the transitive ones (mcp pulls in ~30) back.
+    if python3 -m pip install --help 2>/dev/null | grep -q -- --uploaded-prior-to; then
+        export PIP_UPLOADED_PRIOR_TO="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+    else
+        echo "WARNING: pip older than 26.0 cannot enforce the 7-day release quarantine."
+        echo "         Upgrade with: python3 -m pip install --upgrade pip"
+        sleep 3
+    fi
 fi
 
 # 2. Track Preference

@@ -73,8 +73,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
+      # pip 26.1+ understands P7D; 26.2.1 is the newest release past the 7-day window itself.
+      - name: Pin pip
+        run: python -m pip install pip==26.2.1
       - name: Install Python CLI dependencies
         run: pip install -r requirements.txt
+        env:
+          # 7-day release quarantine for the transitive dependencies the requirements files don't pin.
+          PIP_UPLOADED_PRIOR_TO: P7D
       # cli-tools/*/node/cli.js resolves axios and dotenv from the repo root, so the
       # root install is required before any test that spawns a CLI.
       - name: Install root CLI dependencies
@@ -105,7 +111,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
+      - name: Pin pip
+        run: python -m pip install pip==26.2.1
       - name: Install dependencies
+        env:
+          PIP_UPLOADED_PRIOR_TO: P7D
         run: |
           pip install -r tests/python/requirements.txt
           pip install -r mcp-servers/platform/python/requirements.txt

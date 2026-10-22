@@ -81,6 +81,15 @@ if ($langIdx -eq 0) {
     python -m pip --version *> $null
     if ($LASTEXITCODE -ne 0) { Stop-Install "pip is not available for python." }
     $helperScript = Join-Path $ScriptDir "agent_config.py"
+    # 7-day release quarantine, as pnpm-workspace.yaml does for Node. The requirements files pin
+    # only direct dependencies, so this is what holds the transitive ones (mcp pulls in ~30) back.
+    if ((python -m pip install --help 2>$null) -match '--uploaded-prior-to') {
+        $env:PIP_UPLOADED_PRIOR_TO = [DateTime]::UtcNow.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ")
+    } else {
+        Write-Host "WARNING: pip older than 26.0 cannot enforce the 7-day release quarantine." -ForegroundColor Yellow
+        Write-Host "         Upgrade with: python -m pip install --upgrade pip" -ForegroundColor Yellow
+        Start-Sleep -Seconds 3
+    }
 }
 function Invoke-Helper { & $runtime $helperScript @args }
 
