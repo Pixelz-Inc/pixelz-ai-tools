@@ -18,6 +18,9 @@ const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 const MAX_RETRIES = 3;
 const RETRY_STATUS = new Set([429, 502, 503, 504]);
+// Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
+// it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
+const RETRY_METHODS = new Set(['get', 'head', 'options', 'put', 'delete']);
 
 const axiosRetry = axios.create();
 axiosRetry.interceptors.response.use(undefined, async (error) => {
@@ -25,12 +28,17 @@ axiosRetry.interceptors.response.use(undefined, async (error) => {
     if (!config) throw error;
     config.__retryCount = config.__retryCount || 0;
     const status = error.response?.status;
-    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    const isRetryable = RETRY_METHODS.has(config.method)
+        && (RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code));
     if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
     config.__retryCount++;
-    const retryAfter = error.response?.headers?.['retry-after'];
-    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    // Retry-After may be an HTTP-date rather than seconds; anything non-numeric falls back to backoff.
+    const retryAfter = Number(error.response?.headers?.['retry-after']);
+    const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
     await new Promise(r => setTimeout(r, delay));
+    // The first attempt consumed the upload stream; resending it would declare the full
+    // Content-Length but send zero bytes and hang until timeout.
+    if (config.data instanceof fs.ReadStream) config.data = fs.createReadStream(config.data.path);
     return axiosRetry(config);
 });
 
@@ -54,7 +62,8 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level: string, message: string, data?: any) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
+    // Redacted here, not at call sites: error text can carry a credentialed request URL.
+    fs.appendFile(logFile, redactSecrets(entry), (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value: string, name: string) {
@@ -94,17 +103,25 @@ async function ensureUrl(input: string) {
     log('info', 'Requesting presigned URL', { fileName });
     const presignRes = await axiosRetry.post(`${BASE_URL}/RequestPresignUrls`, { ...auth, imageNames: [fileName] }, { timeout: REQUEST_TIMEOUT });
     const presignData = presignRes.data;
-    if (presignData && !Array.isArray(presignData) && presignData.ErrorCode) {
+    // Documented shape is {ErrorCode: "NoError", Message: "", PostingUrls: [...]}. ErrorCode is
+    // always present, so only a value other than NoError is a failure.
+    const code = Array.isArray(presignData) ? undefined : presignData?.ErrorCode;
+    if (code != null && code !== 'NoError' && code !== 0) {
+        if (code === 'InvalidCustomerInformation') {
+            throw new Error(`[AUTH_ERROR] Platform API rejected the credentials: ${presignData.Message || ''}`);
+        }
         throw new Error(
-            `[PRESIGN_UNAVAILABLE] ${presignData.Message || 'Presigned URL request failed'}. ` +
-            'Your account is not enabled for direct file uploads. ' +
+            `[PRESIGN_UNAVAILABLE] ${code}: ${presignData.Message || 'Presigned URL request failed'}. ` +
+            'The account may not be enabled for direct file uploads. ' +
             'Provide a publicly accessible image URL instead of a local file path.'
         );
     }
-    if (!Array.isArray(presignData) || presignData.length === 0) {
+    // A bare array is still accepted, as this code originally assumed that shape.
+    const postingUrls = Array.isArray(presignData) ? presignData : presignData?.PostingUrls;
+    if (!Array.isArray(postingUrls) || postingUrls.length === 0) {
         throw new Error('Presigned URL request returned an unexpected response.');
     }
-    const { UploadUrl, DownloadUrl } = presignData[0];
+    const { UploadUrl, DownloadUrl } = postingUrls[0];
     const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file to S3', { fileName, size: fileSize });
     await axiosRetry.put(UploadUrl, fileStream, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(fileSize) }, timeout: REQUEST_TIMEOUT, maxContentLength: Infinity, maxBodyLength: Infinity });

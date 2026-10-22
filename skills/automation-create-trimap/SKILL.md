@@ -28,7 +28,7 @@ The command runs asynchronously by default. The response contains a `job_id`. Af
 1. Tell the user: *"Trimap generation is processing. Your job ID is `<job_id>`. Let me know when you want me to check the result."*
 2. Remember the `job_id` for when the user asks for an update.
 3. When the user asks to check, use the **Get Job Status** skill with that `job_id`.
-4. When status is `FINISHED`, the response contains:
+4. When `status.status_name` is `Completed` or `Delivered`, the response's `result` object contains:
    - `result_image_url`: The trimap PNG — pass this as `--trimap <URL>` to `remove-bg` or `create-mask` for better edge quality.
    - `result_trimap_vector_url`: JSON vector format of the trimap (may be null).
 

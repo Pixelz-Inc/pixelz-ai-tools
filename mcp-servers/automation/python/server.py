@@ -59,8 +59,9 @@ def log(level, message, data=None):
     entry = f"[{datetime.now(timezone.utc).isoformat()}] [{level}] {message}"
     if data is not None:
         entry += f" {json.dumps(data, default=str)}"
+    # Redacted here, not at call sites: error text can carry a credentialed request URL.
     with open(_log_file, 'a') as f:
-        f.write(entry + '\n')
+        f.write(redact_secrets(entry) + '\n')
 
 def validate_id(value, name):
     if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
@@ -135,7 +136,7 @@ def _format_error(tool_name, e):
             msg = f"[HTTP_{status}] {json.dumps(body)}"
         except Exception:
             msg = f"[HTTP_{status}] {e.response.text}"
-    elif isinstance(e, ValueError):
+    elif isinstance(e, ValueError) and not str(e).startswith('[AUTH_ERROR]'):
         msg = f"[VALIDATION_ERROR] {e}"
     else:
         msg = str(e)
@@ -156,7 +157,7 @@ def _validate_crop_location(value, name):
         raise ValueError(f"{name}: must be one of {', '.join(CROP_LOCATIONS)}")
 
 @mcp.tool()
-def remove_background(imagePath: str, backgroundColor: str = None, transparentBackground: bool = True,
+def remove_background(imagePath: str, backgroundColor: str = None, transparentBackground: bool = None,
                       featherWidth: float = None, trimapUrl: str = None, callbackUrl: str = None,
                       sync: bool = False) -> str:
     """AI-powered background removal. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0-1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Set sync=True only if the user explicitly requests it (risk of timeout)."""
@@ -165,6 +166,14 @@ def remove_background(imagePath: str, backgroundColor: str = None, transparentBa
         _validate_hex_color(backgroundColor, 'backgroundColor')
         if featherWidth is not None and featherWidth < 0:
             raise ValueError("featherWidth: must be >= 0")
+        # The API takes exactly one of the two ("do not set both, and do not leave both unset"),
+        # so transparency defaults to the opposite of whether a color was given.
+        if transparentBackground is None:
+            transparentBackground = not backgroundColor
+        if backgroundColor and transparentBackground:
+            raise ValueError("backgroundColor and transparentBackground=true cannot be used together")
+        if not backgroundColor and not transparentBackground:
+            raise ValueError("transparentBackground=false requires backgroundColor: set backgroundColor, or leave transparentBackground unset/true")
         log('info', 'Tool called: remove_background')
         token = get_token()
         url = ensure_url_or_id(imagePath, token)
@@ -249,7 +258,7 @@ def model_crop(imagePath: str, topCropLocation: str = None, bottomCropLocation: 
 
 @mcp.tool()
 def get_job_status(jobId: str) -> str:
-    """Check the status of any async Automation job. Most jobs finish in 30-60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. PENDING/PROCESSING = still working, report status and check again later; FINISHED = result_image_url is ready; FAILED = report the error and ask whether to resubmit."""
+    """Check the status of any async Automation job. Most jobs finish in 30-60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. Read status.status_name: Created/ReadyForProcess/Processing = still working, report status and check again later; Completed or Delivered = result.result_image_url is ready; Failed = report the error to the user and ask whether to resubmit."""
     try:
         validate_id(jobId, 'jobId')
         log('info', 'Tool called: get_job_status', {'jobId': jobId})

@@ -53,13 +53,13 @@ See `automation-get-job-status` for the full status table and result handling.
 
 ## Step 3 — Deliver the Result
 
-When status is `FINISHED`:
-- Extract `result_image_url` from the response.
+When `status.status_name` is `Completed` or `Delivered`:
+- Extract `result.result_image_url` from the response.
 - Present it as a direct download link to the user.
 - For mask results: explain the image is greyscale (white = subject, black = background).
 - For trimap results: advise passing the URL as `--trimap` to `remove-bg` or `create-mask` for improved edge quality.
 
-If status is `FAILED`:
+If `status.status_name` is `Failed`:
 - Report the error message from the response to the user.
 - Ask whether they want to resubmit with adjusted parameters.
 

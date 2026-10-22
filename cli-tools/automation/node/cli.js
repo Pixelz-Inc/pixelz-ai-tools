@@ -12,6 +12,9 @@ const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 const MAX_RETRIES = 3;
 const RETRY_STATUS = new Set([429, 502, 503, 504]);
+// Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
+// it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
+const RETRY_METHODS = new Set(['get', 'head', 'options', 'put', 'delete']);
 
 const axiosRetry = axios.create();
 axiosRetry.interceptors.response.use(undefined, async (error) => {
@@ -19,12 +22,17 @@ axiosRetry.interceptors.response.use(undefined, async (error) => {
     if (!config) throw error;
     config.__retryCount = config.__retryCount || 0;
     const status = error.response?.status;
-    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    const isRetryable = RETRY_METHODS.has(config.method)
+        && (RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code));
     if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
     config.__retryCount++;
-    const retryAfter = error.response?.headers?.['retry-after'];
-    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    // Retry-After may be an HTTP-date rather than seconds; anything non-numeric falls back to backoff.
+    const retryAfter = Number(error.response?.headers?.['retry-after']);
+    const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
     await new Promise(r => setTimeout(r, delay));
+    // The first attempt consumed the upload stream; resending it would declare the full
+    // Content-Length but send zero bytes and hang until timeout.
+    if (config.data instanceof fs.ReadStream) config.data = fs.createReadStream(config.data.path);
     return axiosRetry(config);
 });
 
@@ -48,7 +56,8 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level, message, data) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
+    // Redacted here, not at call sites: error text can carry a credentialed request URL.
+    fs.appendFile(logFile, redactSecrets(entry), (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value, name) {
@@ -132,12 +141,16 @@ function makeHeaders(token, sync = false) {
 const commands = {
     'remove-bg': async (input, options = {}) => {
         log('info', 'remove-bg');
+        // The API takes exactly one of the two ("do not set both, and do not leave both unset").
+        const transparent = options.transparent !== undefined ? String(options.transparent) === 'true' : !options.color;
+        if (options.color && transparent) throw new Error('[VALIDATION_ERROR] --color and --transparent true cannot be used together');
+        if (!options.color && !transparent) throw new Error('[VALIDATION_ERROR] --transparent false requires --color');
         const token = await getAccessToken();
         const urlOrId = await ensureUrlOrId(input, token);
         const payload = filterNull({
             image_url: urlOrId,
             background_color: options.color,
-            transparent_background: options.transparent !== undefined ? options.transparent : !options.color,
+            transparent_background: transparent,
             feather_width: options.feather ? parseFloat(options.feather) : undefined,
             trimap_url: options.trimap,
             callback_url: options.callback
@@ -273,7 +286,9 @@ if (commands[cmd]) {
             } else if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
                 console.error(redactSecrets(`[NETWORK_ERROR] ${err.message}`));
             } else {
-                console.error(redactSecrets(`[API_ERROR] ${err.message}`));
+                // Messages raised with their own category (e.g. [AUTH_ERROR]) keep it as-is.
+                const msg = /^\[[A-Z0-9_]+\]/.test(err.message) ? err.message : `[API_ERROR] ${err.message}`;
+                console.error(redactSecrets(msg));
             }
             process.exit(1);
         }

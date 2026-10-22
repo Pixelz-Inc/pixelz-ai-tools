@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -102,6 +104,26 @@ describe('platform CLI — credential redaction in failure output', () => {
             expect(out).not.toContain(encodeURIComponent(AWKWARD_KEY));
             expect(out).not.toContain(AWKWARD_EMAIL);
             expect(out).not.toContain(encodeURIComponent(AWKWARD_EMAIL));
+        }, 120_000);
+
+        // stderr was redacted but PIXELZ_LOG_FILE got the raw exception text, which carries the
+        // credentialed request URL — readable by any agent with file access.
+        it(`${label}: never writes the key to PIXELZ_LOG_FILE`, async () => {
+            const logFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pixelz-log-')), 'cli.log');
+            await run(cmd, [...argv, 'get-contact'], {
+                ...baseEnv(),
+                PIXELZ_PLATFORM_EMAIL: AWKWARD_EMAIL,
+                PIXELZ_PLATFORM_API_KEY: AWKWARD_KEY,
+                PIXELZ_LOG_FILE: logFile,
+            });
+            // Node appends asynchronously; give the write a moment to land after exit.
+            await new Promise(r => setTimeout(r, 200));
+            const logged = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+            expect(logged).not.toBe('');
+            expect(logged).not.toContain(AWKWARD_KEY);
+            expect(logged).not.toContain(encodeURIComponent(AWKWARD_KEY));
+            expect(logged).not.toContain(AWKWARD_EMAIL);
+            expect(logged).not.toContain(encodeURIComponent(AWKWARD_EMAIL));
         }, 120_000);
     }
 });

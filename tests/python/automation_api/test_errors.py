@@ -135,3 +135,16 @@ def test_ensure_url_or_id_rejects_directory():
     mod = load_automation_server()
     with pytest.raises(Exception, match='Not a regular file'):
         mod.ensure_url_or_id('.', 'token')
+
+
+@patch.dict(os.environ, {
+    'PIXELZ_DOTENV_PATH': '/dev/null',
+    'PIXELZ_AUTOMATION_CLIENT_ID': 'client123',
+    'PIXELZ_AUTOMATION_CLIENT_SECRET': 'secret456',
+}, clear=False)
+def test_format_error_keeps_auth_errors_out_of_validation():
+    """get_auth/get_token raise ValueError('[AUTH_ERROR] ...'); it was shown to agents as
+    '[VALIDATION_ERROR] [AUTH_ERROR] ...'."""
+    mod = load_automation_server()
+    result = mod._format_error('test_tool', ValueError('[AUTH_ERROR] Missing credentials'))
+    assert result == 'Error: [AUTH_ERROR] Missing credentials'

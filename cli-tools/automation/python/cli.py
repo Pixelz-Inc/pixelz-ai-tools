@@ -53,8 +53,9 @@ def log(level, message, data=None):
     entry = f"[{datetime.now(timezone.utc).isoformat()}] [{level}] {message}"
     if data is not None:
         entry += f" {json.dumps(data, default=str)}"
+    # Redacted here, not at call sites: error text can carry a credentialed request URL.
     with open(_log_file, 'a') as f:
-        f.write(entry + '\n')
+        f.write(redact_secrets(entry) + '\n')
 
 def validate_id(value, name):
     if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
@@ -174,11 +175,17 @@ def main():
 
         if args.command == 'remove-bg':
             log('info', 'remove-bg')
+            # The API takes exactly one of the two ("do not set both, and do not leave both unset").
+            transparent = args.transparent == 'true' if args.transparent else (not args.color)
+            if args.color and transparent:
+                raise ValueError("[VALIDATION_ERROR] --color and --transparent true cannot be used together")
+            if not args.color and not transparent:
+                raise ValueError("[VALIDATION_ERROR] --transparent false requires --color")
             url_or_id = ensure_url_or_id(args.input, token)
             payload = {
                 'image_url': url_or_id,
                 'background_color': args.color,
-                'transparent_background': args.transparent == 'true' if args.transparent else (not args.color),
+                'transparent_background': transparent,
                 'feather_width': args.feather,
                 'trimap_url': args.trimap,
                 'callback_url': args.callback
@@ -267,7 +274,9 @@ def main():
         sys.exit(1)
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
-        print(redact_secrets(f"[API_ERROR] {e}"), file=sys.stderr)
+        # Messages raised with their own category (e.g. [AUTH_ERROR]) keep it as-is.
+        msg = str(e) if re.match(r'^\[[A-Z0-9_]+\]', str(e)) else f"[API_ERROR] {e}"
+        print(redact_secrets(msg), file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

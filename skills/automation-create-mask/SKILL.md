@@ -30,7 +30,7 @@ The command runs asynchronously by default. The response contains a `job_id`. Af
 1. Tell the user: *"Mask creation is processing. Your job ID is `<job_id>`. Let me know when you want me to check the result."*
 2. Remember the `job_id` for when the user asks for an update.
 3. When the user asks to check, use the **Get Job Status** skill with that `job_id`.
-4. When status is `FINISHED`, present the `result_image_url` and explain: white = subject, black = background.
+4. When `status.status_name` is `Completed` or `Delivered`, present `result.result_image_url` and explain: white = subject, black = background.
 
 ## Synchronous mode (advanced users only)
 Add `--sync` to the command to get the result immediately. Only do this if the user explicitly asks — it may time out on large images.

@@ -11,6 +11,9 @@ const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 const MAX_RETRIES = 3;
 const RETRY_STATUS = new Set([429, 502, 503, 504]);
+// Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
+// it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
+const RETRY_METHODS = new Set(['get', 'head', 'options', 'put', 'delete']);
 
 const axiosRetry = axios.create();
 axiosRetry.interceptors.response.use(undefined, async (error) => {
@@ -18,12 +21,17 @@ axiosRetry.interceptors.response.use(undefined, async (error) => {
     if (!config) throw error;
     config.__retryCount = config.__retryCount || 0;
     const status = error.response?.status;
-    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    const isRetryable = RETRY_METHODS.has(config.method)
+        && (RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code));
     if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
     config.__retryCount++;
-    const retryAfter = error.response?.headers?.['retry-after'];
-    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    // Retry-After may be an HTTP-date rather than seconds; anything non-numeric falls back to backoff.
+    const retryAfter = Number(error.response?.headers?.['retry-after']);
+    const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
     await new Promise(r => setTimeout(r, delay));
+    // The first attempt consumed the upload stream; resending it would declare the full
+    // Content-Length but send zero bytes and hang until timeout.
+    if (config.data instanceof fs.ReadStream) config.data = fs.createReadStream(config.data.path);
     return axiosRetry(config);
 });
 
@@ -47,7 +55,8 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level, message, data) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
+    // Redacted here, not at call sites: error text can carry a credentialed request URL.
+    fs.appendFile(logFile, redactSecrets(entry), (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value, name) {
@@ -123,17 +132,25 @@ async function ensureUrl(input) {
         imageNames: [fileName]
     }, { timeout: REQUEST_TIMEOUT });
     const presignData = presignRes.data;
-    if (presignData && !Array.isArray(presignData) && presignData.ErrorCode) {
+    // Documented shape is {ErrorCode: "NoError", Message: "", PostingUrls: [...]}. ErrorCode is
+    // always present, so only a value other than NoError is a failure.
+    const code = Array.isArray(presignData) ? undefined : presignData?.ErrorCode;
+    if (code != null && code !== 'NoError' && code !== 0) {
+        if (code === 'InvalidCustomerInformation') {
+            throw new Error(`[AUTH_ERROR] Platform API rejected the credentials: ${presignData.Message || ''}`);
+        }
         throw new Error(
-            `[PRESIGN_UNAVAILABLE] ${presignData.Message || 'Presigned URL request failed'}. ` +
-            'Your account is not enabled for direct file uploads. ' +
+            `[PRESIGN_UNAVAILABLE] ${code}: ${presignData.Message || 'Presigned URL request failed'}. ` +
+            'The account may not be enabled for direct file uploads. ' +
             'Provide a publicly accessible image URL instead of a local file path.'
         );
     }
-    if (!Array.isArray(presignData) || presignData.length === 0) {
+    // A bare array is still accepted, as this code originally assumed that shape.
+    const postingUrls = Array.isArray(presignData) ? presignData : presignData?.PostingUrls;
+    if (!Array.isArray(postingUrls) || postingUrls.length === 0) {
         throw new Error('Presigned URL request returned an unexpected response.');
     }
-    const { UploadUrl, DownloadUrl } = presignData[0];
+    const { UploadUrl, DownloadUrl } = postingUrls[0];
     const fileStream = fs.createReadStream(resolved);
     log('info', 'Uploading file to S3', { fileName, size: fileSize });
     await axiosRetry.put(UploadUrl, fileStream, {
@@ -331,15 +348,24 @@ if (commands[cmd]) {
     const { filteredArgs, options } = parseArgs(args);
     (async () => {
         try {
-            if (cmd === 'upload') {
-                if (options.colorwayIds) options.colorwayIds = JSON.parse(options.colorwayIds);
-                await commands.upload(filteredArgs[0], filteredArgs[1], options);
+            if (cmd === 'upload' || cmd === 'stack') {
+                // --template is what the skills and the Python CLI use. Left in `options` it was
+                // spread into the payload as an unknown `template` field and the job was created
+                // without one. The positional form is still accepted for existing callers.
+                /** @type {Record<string, any>} */
+                const { template, templateId: templateIdFlag, ...rest } = options;
+                const templateId = template ?? templateIdFlag ?? filteredArgs[1];
+                if (cmd === 'upload') {
+                    if (templateId == null) throw new Error('[VALIDATION_ERROR] upload requires --template <ID>');
+                    if (rest.colorwayIds) rest.colorwayIds = JSON.parse(rest.colorwayIds);
+                    // Integers, as documented and as the Python CLI sends them.
+                    for (const k of ['markerX', 'markerY']) if (rest[k] != null) rest[k] = parseInt(rest[k], 10);
+                }
+                await commands[cmd](filteredArgs[0], templateId == null ? undefined : String(templateId), rest);
             } else if (cmd === 'add-color-library') {
                 await commands['add-color-library'](...filteredArgs);
             } else if (cmd === 'white-glove') {
                 await commands['white-glove'](filteredArgs[0], options);
-            } else if (cmd === 'stack') {
-                await commands.stack(filteredArgs[0], filteredArgs[1], options);
             } else if (cmd === 'list-images' || cmd === 'count-images' || cmd === 'get-invoices' || cmd === 'list-products') {
                 await commands[cmd](options);
             } else if (cmd === 'reject') {
@@ -359,7 +385,9 @@ if (commands[cmd]) {
             } else if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
                 console.error(redactSecrets(`[NETWORK_ERROR] ${err.message}`));
             } else {
-                console.error(redactSecrets(`[API_ERROR] ${err.message}`));
+                // Messages raised with their own category (e.g. [AUTH_ERROR]) keep it as-is.
+                const msg = /^\[[A-Z0-9_]+\]/.test(err.message) ? err.message : `[API_ERROR] ${err.message}`;
+                console.error(redactSecrets(msg));
             }
             process.exit(1);
         }
@@ -372,9 +400,9 @@ Usage: node cli.js <command> [args] [--options]
 Commands:
   list-templates                          List retouching specification templates
   get-template <id>                       Get template details by ID
-  upload <path|url> <templateId> [opts]   Submit image for retouching
+  upload <path|url> --template <id> [opts] Submit image for retouching
   white-glove <path|url> [opts]           Submit image for white-glove review
-  stack <path|url> <templateId> [opts]    Submit image as part of a stack
+  stack <path|url> [--template <id>]      Submit image as part of a stack
   status <ticket> [--customer-id X]       Get image processing status
   list-images [--status X] [--fromDate]   List images (status: 10/new, 60/in production, 70/production finished, 80/delivered)
   count-images [--status X] [--fromDate]  Count images (accepts same status names or codes)

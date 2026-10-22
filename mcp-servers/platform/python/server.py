@@ -55,8 +55,9 @@ def log(level, message, data=None):
     entry = f"[{datetime.now(timezone.utc).isoformat()}] [{level}] {message}"
     if data is not None:
         entry += f" {json.dumps(data, default=str)}"
+    # Redacted here, not at call sites: error text can carry a credentialed request URL.
     with open(_log_file, 'a') as f:
-        f.write(entry + '\n')
+        f.write(redact_secrets(entry) + '\n')
 
 def validate_id(value, name):
     if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
@@ -101,21 +102,29 @@ def ensure_url(input_path):
     r = _session.post(f"{BASE_URL}/RequestPresignUrls", json={**auth, 'imageNames': [file_name]}, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     body = r.json()
-    if isinstance(body, dict) and body.get('ErrorCode'):
+    # Documented shape is {"ErrorCode": "NoError", "Message": "", "PostingUrls": [...]}. ErrorCode
+    # is always present, so only a value other than NoError is a failure.
+    code = body.get('ErrorCode') if isinstance(body, dict) else None
+    if code not in (None, 'NoError', 0):
+        if code == 'InvalidCustomerInformation':
+            raise Exception(f"[AUTH_ERROR] Platform API rejected the credentials: {body.get('Message', '')}")
         raise Exception(
-            f"[PRESIGN_UNAVAILABLE] {body.get('Message', 'Presigned URL request failed')}. "
-            "Your account is not enabled for direct file uploads. "
+            f"[PRESIGN_UNAVAILABLE] {code}: {body.get('Message') or 'Presigned URL request failed'}. "
+            "The account may not be enabled for direct file uploads. "
             "Provide a publicly accessible image URL instead of a local file path."
         )
-    if not isinstance(body, list) or not body:
+    # A bare list is still accepted, as this code originally assumed that shape.
+    posting_urls = body.get('PostingUrls') if isinstance(body, dict) else body
+    if not isinstance(posting_urls, list) or not posting_urls:
         raise Exception("RequestPresignUrls returned an unexpected response.")
+    target = posting_urls[0]
     log('info', 'Uploading file to S3', {'fileName': file_name, 'size': file_size})
     with open(resolved, 'rb') as f:
-        r_put = _session.put(body[0]['UploadUrl'], data=f, headers={'Content-Type': 'application/octet-stream'}, timeout=REQUEST_TIMEOUT)
+        r_put = _session.put(target['UploadUrl'], data=f, headers={'Content-Type': 'application/octet-stream'}, timeout=REQUEST_TIMEOUT)
         # Without this the DownloadUrl is returned for an object that was never stored,
         # and the retouching job is created against a missing file.
         r_put.raise_for_status()
-    return body[0]['DownloadUrl']
+    return target['DownloadUrl']
 
 def _format_error(tool_name, e):
     """Format errors with categorized prefixes matching Node.js MCP parity."""
@@ -130,7 +139,7 @@ def _format_error(tool_name, e):
             msg = f"[HTTP_{status}] {json.dumps(body)}"
         except Exception:
             msg = f"[HTTP_{status}] {e.response.text}"
-    elif isinstance(e, ValueError):
+    elif isinstance(e, ValueError) and not str(e).startswith('[AUTH_ERROR]'):
         msg = f"[VALIDATION_ERROR] {e}"
     else:
         msg = str(e)

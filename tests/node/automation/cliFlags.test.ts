@@ -37,7 +37,7 @@ beforeAll(async () => {
                 headers: req.headers as Record<string, any>,
             };
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ job_id: 'job-123', status: 'PENDING' }));
+            res.end(JSON.stringify({ job_id: 'job-123', status: { status_code: 1, status_name: 'Created' } }));
         });
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -79,6 +79,19 @@ for (const [label, run] of [['node', runNode], ['python', runPy]] as const) {
         it('remove-bg defaults to transparent when no colour is given', async () => {
             await run(['remove-bg', IMG]);
             expect(lastRequest.body.transparent_background).toBe(true);
+        });
+
+        // The API spec: choose exactly one of background_color / transparent_background.
+        it('remove-bg rejects --color with --transparent true before sending anything', async () => {
+            lastRequest = undefined as any;
+            await expect(run(['remove-bg', IMG, '--color', '#FFFFFF', '--transparent', 'true']))
+                .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('[VALIDATION_ERROR]') });
+            expect(lastRequest).toBeUndefined();
+        });
+
+        it('remove-bg rejects --transparent false without a colour', async () => {
+            await expect(run(['remove-bg', IMG, '--transparent', 'false']))
+                .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('[VALIDATION_ERROR]') });
         });
 
         it('remove-bg --feather maps to feather_width as a number', async () => {

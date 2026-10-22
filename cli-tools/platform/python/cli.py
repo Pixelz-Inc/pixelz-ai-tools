@@ -49,8 +49,9 @@ def log(level, message, data=None):
     entry = f"[{datetime.now(timezone.utc).isoformat()}] [{level}] {message}"
     if data is not None:
         entry += f" {json.dumps(data, default=str)}"
+    # Redacted here, not at call sites: error text can carry a credentialed request URL.
     with open(_log_file, 'a') as f:
-        f.write(entry + '\n')
+        f.write(redact_secrets(entry) + '\n')
 
 STATUS_ALIASES = {
     'new': '10', 'in production': '60', 'production finished': '70', 'delivered': '80'
@@ -103,16 +104,24 @@ def ensure_url(input_path):
     r = _session.post(f"{BASE_URL}/RequestPresignUrls", json={**auth, 'imageNames': [file_name]}, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     body = r.json()
-    if isinstance(body, dict) and body.get('ErrorCode'):
+    # Documented shape is {"ErrorCode": "NoError", "Message": "", "PostingUrls": [...]}. ErrorCode
+    # is always present, so only a value other than NoError is a failure.
+    code = body.get('ErrorCode') if isinstance(body, dict) else None
+    if code not in (None, 'NoError', 0):
+        if code == 'InvalidCustomerInformation':
+            raise Exception(f"[AUTH_ERROR] Platform API rejected the credentials: {body.get('Message', '')}")
         raise Exception(
-            f"[PRESIGN_UNAVAILABLE] {body.get('Message', 'Presigned URL request failed')}. "
-            "Your account is not enabled for direct file uploads. "
+            f"[PRESIGN_UNAVAILABLE] {code}: {body.get('Message') or 'Presigned URL request failed'}. "
+            "The account may not be enabled for direct file uploads. "
             "Provide a publicly accessible image URL instead of a local file path."
         )
-    if not isinstance(body, list) or not body:
+    # A bare list is still accepted, as this code originally assumed that shape.
+    posting_urls = body.get('PostingUrls') if isinstance(body, dict) else body
+    if not isinstance(posting_urls, list) or not posting_urls:
         raise Exception("RequestPresignUrls returned an unexpected response.")
-    upload_url = body[0]['UploadUrl']
-    download_url = body[0]['DownloadUrl']
+    target = posting_urls[0]
+    upload_url = target['UploadUrl']
+    download_url = target['DownloadUrl']
     
     log('info', 'Uploading file to S3', {'fileName': file_name, 'size': file_size})
     with open(resolved, 'rb') as f:
@@ -362,7 +371,9 @@ def main():
         sys.exit(1)
     except Exception as e:
         log('error', f'{args.command} failed', {'error': str(e)})
-        print(redact_secrets(f"[API_ERROR] {e}"), file=sys.stderr)
+        # Messages raised with their own category (e.g. [AUTH_ERROR]) keep it as-is.
+        msg = str(e) if re.match(r'^\[[A-Z0-9_]+\]', str(e)) else f"[API_ERROR] {e}"
+        print(redact_secrets(msg), file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

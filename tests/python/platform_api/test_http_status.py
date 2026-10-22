@@ -13,6 +13,15 @@ ENV = {
 }
 
 
+# The documented RequestPresignUrls response (docs.pixelz.com/#RequestPresignUrls). The code
+# originally assumed a bare list, and so did this fixture, so the suite never noticed that a
+# real response was rejected.
+PRESIGN_OK = {
+    'ErrorCode': 'NoError', 'Message': '',
+    'PostingUrls': [{'ImageName': 'x.jpg', 'UploadUrl': 'https://s3.example/put', 'DownloadUrl': 'https://s3.example/get'}],
+}
+
+
 def _response(status, body):
     """A requests-like double whose raise_for_status behaves like the real thing."""
     r = MagicMock()
@@ -83,10 +92,32 @@ def test_s3_upload_failure_is_not_reported_as_success():
     for an object that was never stored and the retouching job was created against it.
     """
     mod = load_platform_server()
-    presign = _response(200, [{'UploadUrl': 'https://s3.example/put', 'DownloadUrl': 'https://s3.example/get'}])
+    presign = _response(200, PRESIGN_OK)
     put = _response(403, {'message': 'signature expired'})
 
     with patch.object(mod._session, 'post', return_value=presign), \
          patch.object(mod._session, 'put', return_value=put):
         with pytest.raises(requests.exceptions.HTTPError):
             mod.ensure_url(os.path.abspath(__file__))
+
+
+@patch.dict(os.environ, ENV, clear=False)
+def test_presign_documented_envelope_is_accepted():
+    mod = load_platform_server()
+    with patch.object(mod._session, 'post', return_value=_response(200, PRESIGN_OK)), \
+         patch.object(mod._session, 'put', return_value=_response(200, {})) as put:
+        assert mod.ensure_url(os.path.abspath(__file__)) == 'https://s3.example/get'
+    assert put.call_args[0][0] == 'https://s3.example/put'
+
+
+@patch.dict(os.environ, ENV, clear=False)
+def test_presign_rejected_credentials_are_an_auth_error_not_a_missing_feature():
+    """The live API answers bad credentials with HTTP 200 and ErrorCode InvalidCustomerInformation;
+    that used to be reported as "account not enabled for direct file uploads"."""
+    mod = load_platform_server()
+    rejected = {'ErrorCode': 'InvalidCustomerInformation',
+                'Message': 'The ContactEmail and ContactAPIkey could not be validated.', 'PostingUrls': None}
+    with patch.object(mod._session, 'post', return_value=_response(200, rejected)):
+        with pytest.raises(Exception) as exc:
+            mod.ensure_url(os.path.abspath(__file__))
+    assert str(exc.value).startswith('[AUTH_ERROR]')

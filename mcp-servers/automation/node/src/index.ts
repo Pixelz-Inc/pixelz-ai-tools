@@ -19,6 +19,9 @@ const REQUEST_TIMEOUT = 90000;
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
 const MAX_RETRIES = 3;
 const RETRY_STATUS = new Set([429, 502, 503, 504]);
+// Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
+// it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
+const RETRY_METHODS = new Set(['get', 'head', 'options', 'put', 'delete']);
 
 const axiosRetry = axios.create();
 axiosRetry.interceptors.response.use(undefined, async (error) => {
@@ -26,12 +29,17 @@ axiosRetry.interceptors.response.use(undefined, async (error) => {
     if (!config) throw error;
     config.__retryCount = config.__retryCount || 0;
     const status = error.response?.status;
-    const isRetryable = RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code);
+    const isRetryable = RETRY_METHODS.has(config.method)
+        && (RETRY_STATUS.has(status) || ['ECONNRESET', 'ETIMEDOUT'].includes(error.code));
     if (!isRetryable || config.__retryCount >= MAX_RETRIES) throw error;
     config.__retryCount++;
-    const retryAfter = error.response?.headers?.['retry-after'];
-    const delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
+    // Retry-After may be an HTTP-date rather than seconds; anything non-numeric falls back to backoff.
+    const retryAfter = Number(error.response?.headers?.['retry-after']);
+    const delay = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(1000 * 2 ** (config.__retryCount - 1), 30000);
     await new Promise(r => setTimeout(r, delay));
+    // The first attempt consumed the upload stream; resending it would declare the full
+    // Content-Length but send zero bytes and hang until timeout.
+    if (config.data instanceof fs.ReadStream) config.data = fs.createReadStream(config.data.path);
     return axiosRetry(config);
 });
 
@@ -55,7 +63,8 @@ const logFile = process.env.PIXELZ_LOG_FILE;
 function log(level: string, message: string, data?: any) {
     if (!logFile) return;
     const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    fs.appendFile(logFile, entry, (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
+    // Redacted here, not at call sites: error text can carry a credentialed request URL.
+    fs.appendFile(logFile, redactSecrets(entry), (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
 }
 
 function validateId(value: string, name: string) {
@@ -199,7 +208,7 @@ const TOOLS = [
             },
             {
                 name: "get_job_status",
-                description: "Check the status of any async Automation job. Most jobs finish in 30–60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. PENDING/PROCESSING = still working, report status and check again later; FINISHED = result_image_url is ready; FAILED = report the error to the user and ask whether to resubmit.",
+                description: "Check the status of any async Automation job. Most jobs finish in 30–60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. Read status.status_name: Created/ReadyForProcess/Processing = still working, report status and check again later; Completed or Delivered = result.result_image_url is ready; Failed = report the error to the user and ask whether to resubmit.",
                 inputSchema: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"] }
             },
             {
@@ -276,11 +285,16 @@ async function callTool(name: string, args: any) {
         switch (name) {
             case "remove_background": {
                 const p = RemoveBgSchema.parse(args);
+                // The API takes exactly one of the two ("do not set both, and do not leave both unset"),
+                // so transparency defaults to the opposite of whether a color was given.
+                const transparent = p.transparentBackground ?? !p.backgroundColor;
+                if (p.backgroundColor && transparent) throw new Error('[VALIDATION_ERROR] backgroundColor and transparentBackground=true cannot be used together');
+                if (!p.backgroundColor && !transparent) throw new Error('[VALIDATION_ERROR] transparentBackground=false requires backgroundColor: set backgroundColor, or leave transparentBackground unset/true');
                 const rbUrl = await ensureUrlOrId(p.imagePath, token);
                 response = await axiosRetry.post(`${BASE_URL}/images/remove-background`, filterNull({
                     image_url: rbUrl,
-                    background_color: p.backgroundColor,
-                    transparent_background: p.transparentBackground ?? true,
+                    background_color: p.backgroundColor || undefined,
+                    transparent_background: transparent,
                     feather_width: p.featherWidth,
                     trimap_url: p.trimapUrl,
                     callback_url: p.callbackUrl
