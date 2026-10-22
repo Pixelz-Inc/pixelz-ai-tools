@@ -11,7 +11,7 @@ Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your 
 | Node.js | v22.21 or higher | `node --version` |
 | pnpm | v11 or higher — only for the Node.js MCP track | `pnpm --version` |
 | Python | v3.10 or higher | `python --version` |
-| pip | any recent version | `pip --version` |
+| pip | v26.0 or higher (older pip works, but cannot enforce the 7-day release quarantine) | `pip --version` |
 
 You only need Node.js **or** Python depending on your language choice during installation — not both. The Node.js CLI tools use only Node's built-ins (`fetch`, `process.loadEnvFile`), so the Node.js Skills track installs no packages at all.
 
@@ -91,11 +91,11 @@ You only need keys for the API(s) you intend to use (Platform, Automation, or bo
 ### What the Installer Does
 
 1. Prompts you to choose a **language** (Node.js or Python), **track** (MCP or Skills), **AI agent**, and **install scope** (global or local).
-2. Installs dependencies and builds servers (MCP track), or deploys the 22 skills (Skills track).
+2. Installs dependencies and builds servers (MCP track), or deploys the 22 skills (Skills track — the Python CLI's packages are pip-installed; the Node.js CLI needs none).
 3. Creates the `.env` file from the template.
 4. **Registers everything with your agent** — no manual config editing. MCP servers are added to the agent's own config file (or via `claude mcp add` for Claude Code). Your existing settings and servers are kept, the previous file is saved next to it as `<file>.pixelz-backup`, and a file the installer cannot parse (for example JSON with comments) is left untouched with the entries printed for you to paste.
 
-**Local installs** put everything they need — CLI tools, their dependencies, and the `.env` — in a single `.pixelz/` folder inside your project. Your own `package.json`, lockfile and `requirements.txt` are never touched, and `.pixelz/` ignores itself in git so the `.env` cannot be committed by accident.
+**Local installs** put everything they add to your project — the CLI tools and the `.env` — in a single `.pixelz/` folder. Your own `package.json`, lockfile and `requirements.txt` are never touched, and `.pixelz/` ignores itself in git so the `.env` cannot be committed by accident.
 
 ### Supported Agents
 
