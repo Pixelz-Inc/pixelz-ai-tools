@@ -23,6 +23,15 @@ const RETRY_STATUS = new Set([429, 502, 503, 504]);
 // it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
 const RETRY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
 
+// Socket-level failures worth another attempt on an idempotent request. undici (behind fetch)
+// reports a peer that closed the connection as UND_ERR_SOCKET and a stalled connect as
+// UND_ERR_CONNECT_TIMEOUT, where axios used ECONNRESET / ETIMEDOUT.
+const RETRY_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
+const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
+// Same ceiling as the Python sibling's Retry(retry_after_max=...): a huge Retry-After must not
+// park a CLI run or an MCP tool call for hours.
+const RETRY_AFTER_MAX_SECONDS = 60;
+
 // HTTP via Node's built-in fetch, shaped like the slice of axios this file used to rely on:
 // JSON in/out, a timeout, errors carrying .response / .code, and retries.
 class UploadFile {
@@ -39,15 +48,12 @@ function networkCode(err: any): string | undefined {
     return err.cause?.code ?? err.cause?.errors?.find((e: any) => e.code)?.code;
 }
 
-async function readBody(res: Response): Promise<any> {
-    const text = await res.text();
-    try { return text ? JSON.parse(text) : ''; } catch { return text; }
-}
-
 async function backoff(attempt: number, retryAfter: string | null) {
-    // Retry-After may be an HTTP-date rather than seconds; anything non-numeric falls back to backoff.
-    const secs = retryAfter == null ? NaN : Number(retryAfter);
-    const delay = Number.isFinite(secs) ? secs * 1000 : Math.min(1000 * 2 ** attempt, 30000);
+    // Retry-After may be empty or an HTTP-date rather than seconds; those fall back to backoff.
+    const secs = retryAfter == null || retryAfter.trim() === '' ? NaN : Number(retryAfter);
+    const delay = Number.isFinite(secs)
+        ? Math.min(Math.max(secs, 0), RETRY_AFTER_MAX_SECONDS) * 1000
+        : Math.min(1000 * 2 ** attempt, 30000);
     await new Promise(r => setTimeout(r, delay));
 }
 
@@ -65,24 +71,31 @@ async function request(method: string, url: string, { params, body, headers = {}
             payload = JSON.stringify(body);
             h['Content-Type'] = h['Content-Type'] || 'application/json';
         }
-        let res: Response;
+        let res: Response, text: string;
         try {
             res = await fetch(url, { method, headers: h, body: payload, signal: AbortSignal.timeout(timeout) });
+            // Inside the try and under the same signal: a stall mid-body is a timeout too.
+            text = await res.text();
         } catch (e: any) {
             const code = networkCode(e);
-            if (retryable && (code === 'ECONNRESET' || code === 'ETIMEDOUT')) { await backoff(attempt, null); continue; }
+            if (retryable && code && RETRY_CODES.has(code)) { await backoff(attempt, null); continue; }
+            const timedOut = !!code && TIMEOUT_CODES.has(code);
             // Deliberately no URL in the message: Platform credentials travel in the query string.
-            throw Object.assign(new Error(code ? `${e.message} (${code})` : e.message), { code, network: code !== 'ECONNABORTED' });
+            throw Object.assign(new Error(code ? `${e.message} (${code})` : e.message),
+                { code: timedOut ? 'ECONNABORTED' : code, network: !timedOut && code !== 'ERR_INVALID_URL' });
         }
-        if (res.ok) return { status: res.status, data: await readBody(res) };
+        let data: any = text, isJson = true;
+        try { data = text ? JSON.parse(text) : ''; } catch { isJson = false; }
+        if (res.ok) {
+            // A 2xx that is not JSON is a proxy or login page, not an API answer (Python fails too).
+            if (!isJson) throw new Error(`[API_ERROR] Expected a JSON response (HTTP ${res.status}), got: ${text.slice(0, 100)}`);
+            return { status: res.status, data };
+        }
         if (retryable && RETRY_STATUS.has(res.status)) {
-            const retryAfter = res.headers.get('retry-after');
-            await res.body?.cancel();
-            await backoff(attempt, retryAfter);
+            await backoff(attempt, res.headers.get('retry-after'));
             continue;
         }
-        throw Object.assign(new Error(`Request failed with status code ${res.status}`),
-            { response: { status: res.status, data: await readBody(res) } });
+        throw Object.assign(new Error(`Request failed with status code ${res.status}`), { response: { status: res.status, data } });
     }
 }
 
@@ -98,8 +111,8 @@ const http = {
 };
 
 // fetch's timeout covers the whole request, where axios's was socket inactivity, so an upload's
-// limit must include the transfer itself. Assumes the link sustains at least 256 KB/s.
-const uploadTimeout = (size: number) => REQUEST_TIMEOUT + Math.ceil(size / (256 * 1024)) * 1000;
+// limit must include the transfer itself. 32 KB/s (~256 kbit/s) keeps slow uplinks working.
+const uploadTimeout = (size: number) => REQUEST_TIMEOUT + Math.ceil(size / (32 * 1024)) * 1000;
 
 function redactSecrets(text: string): string {
     let s = text;
@@ -108,7 +121,8 @@ function redactSecrets(text: string): string {
         if (!val) continue;
         // Match raw AND percent-encoded forms: a credential echoed back inside a URL
         // appears encoded, where a literal match would silently miss it.
-        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val)])) {
+        // URLSearchParams (our query strings) encodes !'()~ and spaces differently from encodeURIComponent.
+        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val), new URLSearchParams({ v: val }).toString().slice(2)])) {
             s = s.replaceAll(variant, '<REDACTED>');
         }
     }
@@ -469,7 +483,8 @@ function buildServer() {
     return server;
 }
 
-export { buildServer, callTool, TOOLS, getAccessToken, ensureUrlOrId, validateId, redactSecrets };
+export { buildServer, callTool, TOOLS, getAccessToken, ensureUrlOrId, validateId, redactSecrets,
+    CROP_LOCATIONS, RemoveBgSchema, ModelCropSchema, ColorMatchingSchema, JobIdSchema };
 
 if (process.env.NODE_ENV !== 'test') {
     // legacy: 'serve' (the default) keeps pre-2026 clients working through the

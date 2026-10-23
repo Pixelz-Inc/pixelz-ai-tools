@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Where the user ran us from, before the cd below: a relative target path means what they typed.
+ORIG_PWD="$PWD"
+
 # Determine project root based on script location
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -77,26 +80,50 @@ ensure_env() {
     fi
 }
 
+# The first Python 3.10+ that actually runs. On Windows (Git Bash) `python3` is often the
+# Microsoft Store placeholder: on PATH, but it only opens the Store.
+find_python() {
+    local c
+    for c in python3 python; do
+        "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' &> /dev/null && { echo "$c"; return; }
+    done
+}
+
+# Accept a path the way people paste it: quoted, with a trailing slash, starting with ~, or
+# relative to the directory they ran the installer from.
+normalize_path() {
+    local p="$1"
+    p="${p#\"}"; p="${p%\"}"; p="${p#\'}"; p="${p%\'}"
+    p="${p/#\~/$HOME}"
+    case "$p" in /*|[A-Za-z]:*) ;; *) p="$ORIG_PWD/$p" ;; esac
+    [ "$p" != "/" ] && p="${p%/}"
+    printf '%s' "$p"
+}
+
 # 1. Language Preference — checked right away, because the agent helper runs on it.
 show_menu "Choose Programming Language:" "Node.js" "Python"
 if [ $? -eq 0 ]; then
     LANG_PREF="node"; RUNTIME="node"
     require_cmd node "Node.js"
+    # process.loadEnvFile and fs.openAsBlob are stable from 22.21; earlier 22.x mostly works.
+    node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 21) ? 0 : 1)' \
+        || echo "WARNING: Node.js $(node --version) is older than the supported v22.21."
     HELPER=(node "$SCRIPT_DIR/agent-config.mjs")
 else
-    LANG_PREF="python"; RUNTIME="python3"
-    require_cmd python3 "Python"
-    # `python3 -m pip` rather than `pip`: the dependencies must land in the interpreter the
-    # tools will actually run with.
-    python3 -m pip --version &> /dev/null || { echo "Error: pip is not available for python3."; exit 1; }
-    HELPER=(python3 "$SCRIPT_DIR/agent_config.py")
+    LANG_PREF="python"
+    PY="$(find_python)"
+    [ -n "$PY" ] || { echo "Error: Python 3.10+ is required for the Python track but none was found (on Windows, 'python3' may be the Microsoft Store placeholder)."; exit 1; }
+    RUNTIME="$PY"
+    # `-m pip` rather than `pip`: the dependencies must land in the interpreter the tools run with.
+    "$PY" -m pip --version &> /dev/null || { echo "Error: pip is not available for $PY."; exit 1; }
+    HELPER=("$PY" "$SCRIPT_DIR/agent_config.py")
     # 7-day release quarantine, as pnpm-workspace.yaml does for Node. The requirements files pin
     # only direct dependencies, so this is what holds the transitive ones (mcp pulls in ~30) back.
-    if python3 -m pip install --help 2>/dev/null | grep -q -- --uploaded-prior-to; then
-        export PIP_UPLOADED_PRIOR_TO="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+    if "$PY" -m pip install --help 2>/dev/null | grep -q -- --uploaded-prior-to; then
+        export PIP_UPLOADED_PRIOR_TO="$("$PY" -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
     else
         echo "WARNING: pip older than 26.0 cannot enforce the 7-day release quarantine."
-        echo "         Upgrade with: python3 -m pip install --upgrade pip"
+        echo "         Upgrade with: $PY -m pip install --upgrade pip"
         sleep 3
     fi
 fi
@@ -124,6 +151,7 @@ if [ $? -eq 1 ]; then
     if [ -z "$TARGET_PATH" ]; then
         echo "Error: No path provided."; exit 1
     fi
+    TARGET_PATH="$(normalize_path "$TARGET_PATH")"
     mkdir -p "$TARGET_PATH" || { echo "Error: Failed to create directory '$TARGET_PATH'."; exit 1; }
     TARGET_PATH="$(cd "$TARGET_PATH" && pwd)"
     # Everything a local install needs lives in .pixelz/, so the user's own package.json,
@@ -158,10 +186,10 @@ if [ "$TRACK" == "mcp" ]; then
         PLATFORM_PATH="$PROJECT_ROOT/mcp-servers/platform/node/build/index.js"
         AUTOMATION_PATH="$PROJECT_ROOT/mcp-servers/automation/node/build/index.js"
     else
-        python3 -m pip install -r requirements.txt || { echo "pip install (root) failed."; exit 1; }
-        python3 -m pip install -r mcp-servers/platform/python/requirements.txt \
+        "$PY" -m pip install -r requirements.txt || { echo "pip install (root) failed."; exit 1; }
+        "$PY" -m pip install -r mcp-servers/platform/python/requirements.txt \
             || { echo "pip install (platform) failed."; exit 1; }
-        python3 -m pip install -r mcp-servers/automation/python/requirements.txt \
+        "$PY" -m pip install -r mcp-servers/automation/python/requirements.txt \
             || { echo "pip install (automation) failed."; exit 1; }
         PLATFORM_PATH="$PROJECT_ROOT/mcp-servers/platform/python/server.py"
         AUTOMATION_PATH="$PROJECT_ROOT/mcp-servers/automation/python/server.py"
@@ -187,15 +215,15 @@ else
         done
 
         # The Node CLIs use only Node built-ins, so there is nothing to install for them.
+        # Python packages go into the interpreter, so nothing about them belongs in .pixelz/.
         if [ "$LANG_PREF" == "python" ]; then
-            cp "$PROJECT_ROOT/requirements.txt" "$PIXELZ_DIR/requirements.txt"
-            python3 -m pip install -r "$PIXELZ_DIR/requirements.txt" || { echo "pip install failed."; exit 1; }
+            "$PY" -m pip install -r "$PROJECT_ROOT/requirements.txt" || { echo "pip install failed."; exit 1; }
         fi
         # The CLIs load .env from three levels above cli.js, i.e. $PIXELZ_DIR/.env.
         CLI_ROOT="$PIXELZ_DIR/cli-tools"
     else
         if [ "$LANG_PREF" == "python" ]; then
-            python3 -m pip install -r requirements.txt || { echo "pip install failed."; exit 1; }
+            "$PY" -m pip install -r requirements.txt || { echo "pip install failed."; exit 1; }
         fi
         CLI_ROOT="$PROJECT_ROOT/cli-tools"
     fi

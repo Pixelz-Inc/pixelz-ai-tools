@@ -65,22 +65,54 @@ function agentOf(opts) {
     return agent;
 }
 
-// ---------- JSON config files ----------
+// ---------- Reading and writing the user's config files ----------
+//
+// These are the user's files, not ours, so every edit goes through one cautious path: decode
+// strictly, refuse anything that would not survive a round-trip (the caller then prints the
+// entries for a manual edit), keep the line endings, keep the ORIGINAL as a backup, and replace
+// the file atomically.
 
-function readJson(file) {
-    if (!fs.existsSync(file)) return {};
-    const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
-    if (!text.trim()) return {};
-    let data;
-    try { data = JSON.parse(text); } catch { return null; }
-    return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/** {text (LF-normalized), eol} for an existing file, {text: '', eol: '\n'} for a missing one, or null if undecodable. */
+function readConfig(file) {
+    if (!fs.existsSync(file)) return { text: '', eol: '\n' };
+    let buf = fs.readFileSync(file);
+    if (buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) buf = buf.subarray(3);
+    let text;
+    // fatal: a cp1252 or UTF-16 file must be left alone, not rewritten with U+FFFD in it.
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return null; }
+    return { text: text.replace(/\r\n/g, '\n'), eol: text.includes('\r\n') ? '\r\n' : '\n' };
 }
 
-function writeText(file, text) {
+/** False for values JSON.parse cannot carry back out unchanged: unsafe integers, Infinity. */
+function roundTrips(v) {
+    if (typeof v === 'number') return Number.isFinite(v) && (!Number.isInteger(v) || Number.isSafeInteger(v));
+    if (Array.isArray(v)) return v.every(roundTrips);
+    if (isPlainObject(v)) return Object.values(v).every(roundTrips);
+    return true;
+}
+
+/** {data, eol} for a JSON object we can safely rewrite, or null. */
+function readJson(file, key) {
+    const cfg = readConfig(file);
+    if (!cfg) return null;
+    if (!cfg.text.trim()) return { data: {}, eol: cfg.eol };
+    let data;
+    try { data = JSON.parse(cfg.text); } catch { return null; }
+    if (!isPlainObject(data) || !roundTrips(data)) return null;
+    if (data[key] !== undefined && !isPlainObject(data[key])) return null;
+    return { data, eol: cfg.eol };
+}
+
+function writeText(file, text, eol) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    // Keep the user's previous version: these are their files, not ours.
-    if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.pixelz-backup`);
-    fs.writeFileSync(file, text, 'utf8');
+    // Only the first write makes a backup, so reinstalling never overwrites the user's original.
+    const backup = `${file}.pixelz-backup`;
+    if (fs.existsSync(file) && !fs.existsSync(backup)) fs.copyFileSync(file, backup);
+    const tmp = `${file}.pixelz-tmp`;
+    fs.writeFileSync(tmp, text.replace(/\n/g, eol), 'utf8');
+    fs.renameSync(tmp, file);
 }
 
 function entryFor(format, cmd, script, dotenv) {
@@ -102,32 +134,41 @@ function manualSnippet(format, entries) {
     return JSON.stringify({ [keyFor(format)]: entries }, null, 2);
 }
 
+function leftUntouched(file, format, entries) {
+    console.log(`WARNING: ${file} could not be updated safely (not plain UTF-8 JSON/TOML, or it already holds Pixelz entries in a form this installer does not edit), so it was left untouched. Add these entries by hand:`);
+    console.log(manualSnippet(format, entries));
+}
+
+function removeByHand(file) {
+    console.log(`WARNING: ${file} could not be edited safely, so it was left untouched. Remove the pixelz-platform and pixelz-automation entries by hand.`);
+}
+
 function mergeJson(file, format, entries) {
-    const data = readJson(file);
-    if (data === null) {
-        // Never clobber a file we cannot parse (JSONC comments, a hand edit in progress, ...).
-        console.log(`WARNING: ${file} is not plain JSON, so it was left untouched. Add these entries by hand:`);
-        console.log(manualSnippet(format, entries));
-        return;
-    }
     const key = keyFor(format);
-    data[key] = { ...(data[key] && typeof data[key] === 'object' ? data[key] : {}), ...entries };
-    writeText(file, JSON.stringify(data, null, 2) + '\n');
+    const cfg = readJson(file, key);
+    if (!cfg) return leftUntouched(file, format, entries);
+    cfg.data[key] = { ...(cfg.data[key] ?? {}), ...entries };
+    writeText(file, JSON.stringify(cfg.data, null, 2) + '\n', cfg.eol);
     console.log(`MCP servers written to: ${file}`);
 }
 
 function unmergeJson(file, format) {
-    const data = readJson(file);
-    if (!fs.existsSync(file) || data === null) return;
+    if (!fs.existsSync(file)) return;
     const key = keyFor(format);
-    if (!data[key] || !SERVERS.some(s => s in data[key])) return;
-    for (const s of SERVERS) delete data[key][s];
-    if (Object.keys(data[key]).length === 0) delete data[key];
-    if (Object.keys(data).length === 0) {
+    const cfg = readJson(file, key);
+    if (!cfg) {
+        if (fs.readFileSync(file).includes('pixelz-')) removeByHand(file);
+        return;
+    }
+    const servers = cfg.data[key];
+    if (!servers || !SERVERS.some(s => s in servers)) return;
+    for (const s of SERVERS) delete servers[s];
+    if (Object.keys(servers).length === 0) delete cfg.data[key];
+    if (Object.keys(cfg.data).length === 0) {
         fs.rmSync(file);
         console.log(`Removed ${file} (it held only Pixelz entries).`);
     } else {
-        writeText(file, JSON.stringify(data, null, 2) + '\n');
+        writeText(file, JSON.stringify(cfg.data, null, 2) + '\n', cfg.eol);
         console.log(`Pixelz MCP servers removed from: ${file}`);
     }
 }
@@ -149,36 +190,53 @@ function tomlBlock(entries) {
     return out;
 }
 
-/** Drop our [mcp_servers.pixelz-*] tables (and their sub-tables), keeping everything else verbatim. */
+const isOurTable = name => SERVERS.some(s => name === `mcp_servers.${s}` || name.startsWith(`mcp_servers.${s}.`));
+// A pixelz-* server written any other way (inline table, dotted key) - we do not edit those.
+const OTHER_FORM = /^\s*(?:mcp_servers\s*\.\s*)?["']?pixelz-(?:platform|automation)["']?\s*[.=]/m;
+
+/** Drop our [mcp_servers.pixelz-*] tables and all their sub-tables; keep everything else verbatim. */
 function stripTomlTables(text) {
-    const ours = new Set(SERVERS.flatMap(s => [`mcp_servers.${s}`, `mcp_servers.${s}.env`]));
     const out = [];
     let skipping = false;
-    for (const line of text.split(/\r?\n/)) {
+    let pending = []; // comment/blank lines inside one of our tables, which may belong to the next table
+    for (const line of text.split('\n')) {
         const header = line.match(/^\s*\[\[?([^\]]+)\]\]?\s*(#.*)?$/);
-        if (header) skipping = ours.has(header[1].replace(/["'\s]/g, ''));
+        if (header) {
+            const ours = isOurTable(header[1].replace(/["'\s]/g, ''));
+            // Comments directly above the next (not ours) table are its own: keep them.
+            if (skipping && !ours) out.push(...pending);
+            pending = [];
+            skipping = ours;
+        } else if (skipping) {
+            if (/^\s*(#.*)?$/.test(line)) pending.push(line); else pending = [];
+            continue;
+        }
         if (!skipping) out.push(line);
     }
+    if (skipping) out.push(...pending);
     return out.join('\n').replace(/\n+$/, '');
 }
 
 function mergeToml(file, entries) {
-    const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').replace(/^﻿/, '') : '';
-    const kept = stripTomlTables(existing);
-    writeText(file, (kept ? kept + '\n\n' : '') + tomlBlock(entries).replace(/\n+$/, '\n'));
+    const cfg = readConfig(file);
+    const kept = cfg && stripTomlTables(cfg.text);
+    if (!cfg || OTHER_FORM.test(kept)) return leftUntouched(file, 'codex-toml', entries);
+    writeText(file, (kept ? kept + '\n\n' : '') + tomlBlock(entries).replace(/\n+$/, '\n'), cfg.eol);
     console.log(`MCP servers written to: ${file}`);
 }
 
 function unmergeToml(file) {
     if (!fs.existsSync(file)) return;
-    const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
-    const kept = stripTomlTables(text);
-    if (kept === text.replace(/\n+$/, '')) return;
+    const cfg = readConfig(file);
+    if (!cfg) return removeByHand(file);
+    const kept = stripTomlTables(cfg.text);
+    if (OTHER_FORM.test(kept)) removeByHand(file);
+    if (kept === cfg.text.replace(/\n+$/, '')) return;
     if (!kept.trim()) {
         fs.rmSync(file);
         console.log(`Removed ${file} (it held only Pixelz entries).`);
     } else {
-        writeText(file, kept + '\n');
+        writeText(file, kept + '\n', cfg.eol);
         console.log(`Pixelz MCP servers removed from: ${file}`);
     }
 }
@@ -201,15 +259,23 @@ function onPath(cmd) {
     return probe.status === 0;
 }
 
+// The Windows claude shim is a .cmd, which only cmd.exe can start. cmd.exe treats & | < > ^ as
+// operators outside double quotes and expands %VAR% even inside them, so every argument is
+// quoted and a % makes the installer fall back to printing the commands.
+const cmdUnsafe = args => PLATFORM === 'win32' && args.some(a => a.includes('%'));
+
 function runClaude(args, quiet) {
     const stdio = quiet ? 'ignore' : 'inherit';
-    // The Windows claude shim is a .cmd, which cannot be spawned without a shell; with a shell,
-    // arguments are not quoted for us, so quote any that contain spaces.
     if (PLATFORM === 'win32') {
-        const line = [CLAUDE, ...args].map(a => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ');
+        const line = [CLAUDE, ...args].map(a => `"${a.replace(/"/g, '\\"')}"`).join(' ');
         return spawnSync(line, { stdio, shell: true }).status;
     }
     return spawnSync(CLAUDE, args, { stdio }).status;
+}
+
+function printClaudeCommands(reason, lines) {
+    console.log(`WARNING: ${reason}. Run these by hand:`);
+    for (const l of lines) console.log(`  ${l}`);
 }
 
 function registerMcp(opts) {
@@ -219,13 +285,13 @@ function registerMcp(opts) {
     const scripts = { 'pixelz-platform': opts.platform, 'pixelz-automation': opts.automation };
 
     if (spec.cli === 'claude') {
-        if (!onPath(CLAUDE)) {
-            console.log('WARNING: the `claude` CLI was not found on PATH. Register the servers by hand:');
-            for (const [name, script] of Object.entries(scripts)) {
-                const env = opts.dotenv ? ` -e PIXELZ_DOTENV_PATH="${slash(opts.dotenv)}"` : '';
-                console.log(`  claude mcp add --scope user${env} --transport stdio ${name} -- ${opts.cmd} "${slash(script)}"`);
-            }
-            return;
+        const manual = Object.entries(scripts).map(([name, script]) => {
+            const env = opts.dotenv ? ` -e PIXELZ_DOTENV_PATH="${slash(opts.dotenv)}"` : '';
+            return `claude mcp add --scope user${env} --transport stdio ${name} -- ${opts.cmd} "${slash(script)}"`;
+        });
+        if (!onPath(CLAUDE)) return printClaudeCommands('the `claude` CLI was not found on PATH', manual);
+        if (cmdUnsafe([opts.cmd, opts.platform, opts.automation, opts.dotenv ?? ''])) {
+            return printClaudeCommands('a path contains %, which cmd.exe would expand', manual);
         }
         for (const [name, script] of Object.entries(scripts)) {
             runClaude(['mcp', 'remove', '--scope', 'user', name], true);
@@ -254,7 +320,10 @@ function unregisterMcp(opts) {
     if (opts.scope === 'global') targets.push(...(agent.legacy_mcp ?? []));
     for (const t of targets) {
         if (t.cli === 'claude') {
-            if (!onPath(CLAUDE)) continue;
+            if (!onPath(CLAUDE)) {
+                printClaudeCommands('the `claude` CLI was not found on PATH', SERVERS.map(n => `claude mcp remove --scope user ${n}`));
+                continue;
+            }
             for (const name of SERVERS) {
                 runClaude(['mcp', 'remove', '--scope', 'user', name], true);
             }
@@ -317,12 +386,42 @@ function removeSkills(opts) {
             const p = path.join(dir, name);
             if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); removed++; }
         }
-        if (removed) console.log(`Removed ${removed} Pixelz skills from: ${dir}`);
+        if (removed) {
+            console.log(`Removed ${removed} Pixelz skills from: ${dir}`);
+            // e.g. .agents/skills is read by Codex, the Universal target and Antigravity (local).
+            const sharers = Object.entries(AGENTS)
+                .filter(([id, a]) => id !== opts.agent && a.skills?.[opts.scope] && expand(a.skills[opts.scope], { ...opts, agent: id }) === dir)
+                .map(([, a]) => a.label);
+            if (sharers.length) console.log(`NOTE: ${dir} is shared with ${sharers.join(', ')}; their Pixelz skills were removed too. Reinstall for them if you still use them.`);
+        }
     }
     if (opts.scope === 'global') {
         for (const f of (agent.legacy_files ?? []).map(s => expand(s, opts)).filter(Boolean)) {
             if (fs.existsSync(f)) { fs.rmSync(f); console.log(`Removed ${f}`); }
         }
+    }
+}
+
+/**
+ * Print the agents (other than --exclude) whose Pixelz install in --target still needs the
+ * project's .pixelz/ folder: Pixelz skills in their local skills dir, or an MCP config that points
+ * at <target>/.pixelz/. Uninstall deletes the folder only when this prints nothing.
+ */
+function inUse(opts) {
+    if (!opts.target) fail('--target is required');
+    const names = skillNames(opts.src);
+    const marker = `${slash(opts.target).replace(/\/+$/, '')}/.pixelz/`;
+    for (const [id, a] of Object.entries(AGENTS)) {
+        if (id === opts.exclude) continue;
+        const o = { ...opts, agent: id, scope: 'local' };
+        const dir = expand(a.skills?.local, o);
+        let used = !!dir && names.some(n => fs.existsSync(path.join(dir, n)));
+        for (const spec of [a.mcp?.local, a.mcp?.global]) {
+            if (used || !spec?.file) continue;
+            const file = expand(spec.file, o);
+            used = !!file && fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes(marker);
+        }
+        if (used) console.log(id);
     }
 }
 
@@ -339,7 +438,7 @@ const opts = parseArgs(rest);
 const actions = {
     list, 'skills-dir': o => console.log(skillsDir(agentOf(o), o)),
     'install-skills': installSkills, 'remove-skills': removeSkills,
-    'register-mcp': registerMcp, 'unregister-mcp': unregisterMcp,
+    'register-mcp': registerMcp, 'unregister-mcp': unregisterMcp, 'in-use': inUse,
 };
 if (!actions[action]) fail(`unknown action '${action}' (expected: ${Object.keys(actions).join(', ')})`);
 actions[action](opts);

@@ -32,13 +32,22 @@ function run(cmd: string, args: string[], env: NodeJS.ProcessEnv): Promise<Resul
     });
 }
 
-// An address that refuses connections, so every command fails the same way in both languages.
-const DEAD_URL = 'http://127.0.0.1:9/REST.svc/JSON';
+// A port that was just freed, so connecting is refused (ECONNREFUSED) in both languages. Not
+// port 9: fetch blocks it outright ("bad port") without opening a socket, so the Node side
+// never exercised a real connection failure.
+let DEAD_PORT: number;
+const deadUrl = (suffix = '/REST.svc/JSON') => `http://127.0.0.1:${DEAD_PORT}${suffix}`;
+beforeAll(async () => {
+    const s = createServer();
+    await new Promise<void>(resolve => s.listen(0, '127.0.0.1', resolve));
+    DEAD_PORT = (s.address() as { port: number }).port;
+    await new Promise<void>(resolve => s.close(() => resolve()));
+});
 
 const baseEnv = () => ({
     ...process.env,
     PIXELZ_DOTENV_PATH: path.join(REPO_ROOT, 'nonexistent.env'),
-    PIXELZ_PLATFORM_BASE_URL: DEAD_URL,
+    PIXELZ_PLATFORM_BASE_URL: deadUrl(),
 });
 
 const withCreds = () => ({
@@ -60,21 +69,24 @@ const tracks = [
 ] as const;
 
 for (const { label, cmd, argv } of tracks) {
-    describe(`platform CLI (${label}) — process contract`, () => {
+    describe.concurrent(`platform CLI (${label}) — process contract`, () => {
+        // One failing run feeds three assertions: each run pays Python's connect retries (~15 s
+        // on Windows), and these used to be three identical runs.
+        let failed: Promise<Result>;
+        beforeAll(() => { failed = run(cmd, [...argv, 'get-contact'], withCreds()); });
+
         it('exits non-zero when the request fails', async () => {
-            const r = await run(cmd, [...argv, 'get-contact'], withCreds());
-            expect(r.code).toBe(1);
+            expect((await failed).code).toBe(1);
         }, 120_000);
 
         it('reports a network failure as a categorized error, not a stack trace', async () => {
-            const r = await run(cmd, [...argv, 'get-contact'], withCreds());
+            const r = await failed;
             expect(r.stderr).toContain('[NETWORK_ERROR]');
             expect(r.stderr).not.toContain('Traceback');
         }, 120_000);
 
         it('sends failure diagnostics to stderr, leaving stdout clean for JSON', async () => {
-            const r = await run(cmd, [...argv, 'get-contact'], withCreds());
-            expect(r.stdout.trim()).toBe('');
+            expect((await failed).stdout.trim()).toBe('');
         }, 120_000);
 
         it('reports missing credentials as [AUTH_ERROR] on stderr and exits non-zero', async () => {
@@ -93,37 +105,25 @@ describe('platform CLI — credential redaction in failure output', () => {
     const AWKWARD_EMAIL = 'leaky@example.com';
 
     for (const { label, cmd, argv } of tracks) {
-        it(`${label}: never emits the key raw or percent-encoded`, async () => {
-            const r = await run(cmd, [...argv, 'get-contact'], {
-                ...baseEnv(),
-                PIXELZ_PLATFORM_EMAIL: AWKWARD_EMAIL,
-                PIXELZ_PLATFORM_API_KEY: AWKWARD_KEY,
-            });
-            const out = r.stdout + r.stderr;
-            expect(out).not.toContain(AWKWARD_KEY);
-            expect(out).not.toContain(encodeURIComponent(AWKWARD_KEY));
-            expect(out).not.toContain(AWKWARD_EMAIL);
-            expect(out).not.toContain(encodeURIComponent(AWKWARD_EMAIL));
-        }, 120_000);
-
-        // stderr was redacted but PIXELZ_LOG_FILE got the raw exception text, which carries the
-        // credentialed request URL — readable by any agent with file access.
-        it(`${label}: never writes the key to PIXELZ_LOG_FILE`, async () => {
+        // stderr was redacted but PIXELZ_LOG_FILE once got the raw exception text, which carries
+        // the credentialed request URL — readable by any agent with file access.
+        it.concurrent(`${label}: never emits the key, raw or encoded, to stderr or PIXELZ_LOG_FILE`, async () => {
             const logFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pixelz-log-')), 'cli.log');
-            await run(cmd, [...argv, 'get-contact'], {
+            const r = await run(cmd, [...argv, 'get-contact'], {
                 ...baseEnv(),
                 PIXELZ_PLATFORM_EMAIL: AWKWARD_EMAIL,
                 PIXELZ_PLATFORM_API_KEY: AWKWARD_KEY,
                 PIXELZ_LOG_FILE: logFile,
             });
-            // Node appends asynchronously; give the write a moment to land after exit.
-            await new Promise(r => setTimeout(r, 200));
             const logged = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
-            expect(logged).not.toBe('');
-            expect(logged).not.toContain(AWKWARD_KEY);
-            expect(logged).not.toContain(encodeURIComponent(AWKWARD_KEY));
-            expect(logged).not.toContain(AWKWARD_EMAIL);
-            expect(logged).not.toContain(encodeURIComponent(AWKWARD_EMAIL));
+            // The failure itself must be logged, or this would pass without testing anything.
+            expect(logged).toContain('get-contact failed');
+            for (const out of [r.stdout + r.stderr, logged]) {
+                expect(out).not.toContain(AWKWARD_KEY);
+                expect(out).not.toContain(encodeURIComponent(AWKWARD_KEY));
+                expect(out).not.toContain(AWKWARD_EMAIL);
+                expect(out).not.toContain(encodeURIComponent(AWKWARD_EMAIL));
+            }
         }, 120_000);
     }
 });
@@ -136,8 +136,8 @@ describe('automation CLI — credential redaction and error contract', () => {
     const autoEnv = () => ({
         ...process.env,
         PIXELZ_DOTENV_PATH: path.join(REPO_ROOT, 'nonexistent.env'),
-        PIXELZ_AUTOMATION_AUTH_URL: 'http://127.0.0.1:9/token',
-        PIXELZ_AUTOMATION_BASE_URL: 'http://127.0.0.1:9/v1',
+        PIXELZ_AUTOMATION_AUTH_URL: deadUrl('/token'),
+        PIXELZ_AUTOMATION_BASE_URL: deadUrl('/v1'),
         PIXELZ_AUTOMATION_CLIENT_ID: 'client+id',
         PIXELZ_AUTOMATION_CLIENT_SECRET: SECRET,
     });

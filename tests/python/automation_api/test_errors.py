@@ -147,4 +147,4 @@ def test_format_error_keeps_auth_errors_out_of_validation():
     '[VALIDATION_ERROR] [AUTH_ERROR] ...'."""
     mod = load_automation_server()
     result = mod._format_error('test_tool', ValueError('[AUTH_ERROR] Missing credentials'))
-    assert result == 'Error: [AUTH_ERROR] Missing credentials'
+    assert result == '[AUTH_ERROR] Missing credentials'

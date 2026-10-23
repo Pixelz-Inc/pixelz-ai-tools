@@ -36,10 +36,20 @@ def redact_secrets(text):
     s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
     return s
 BASE_URL = os.environ.get('PIXELZ_AUTOMATION_BASE_URL', 'https://automation-api.pixelz.com/v1')
-REQUEST_TIMEOUT = 90
+# Overridable so tests can exercise the timeout path without waiting 90 s.
+REQUEST_TIMEOUT = float(os.environ.get('PIXELZ_REQUEST_TIMEOUT_SECONDS') or 90)
+
+def _is_read_timeout(e):
+    """requests reports a timeout while reading the body as ConnectionError(ReadTimeoutError)."""
+    import urllib3
+    return bool(e.args) and isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError)
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True)
+# raise_on_status=False: once retries run out, hand back the last response so raise_for_status()
+# reports [HTTP_<status>] (as Node does) instead of an uncategorized RetryError.
+# retry_after_max: the same 60 s ceiling as Node, so a huge Retry-After cannot park a call for hours.
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True,
+               raise_on_status=False, retry_after_max=60)
 _session = requests.Session()
 _session.mount('https://', HTTPAdapter(max_retries=_retry))
 _session.mount('http://', HTTPAdapter(max_retries=_retry))
@@ -171,16 +181,19 @@ def main():
         # Inside the try: a failure here (network, bad credentials, non-2xx from Keycloak)
         # must reach the handlers below so it is redacted and categorized. Called outside,
         # it escaped as a raw traceback carrying the unredacted OAuth request.
-        token = get_token()
-
         if args.command == 'remove-bg':
-            log('info', 'remove-bg')
-            # The API takes exactly one of the two ("do not set both, and do not leave both unset").
+            # Before the token exchange, as in the Node CLI: a bad flag combination should neither
+            # cost a round-trip nor surface as [AUTH_ERROR]. The API takes exactly one of the two.
             transparent = args.transparent == 'true' if args.transparent else (not args.color)
             if args.color and transparent:
                 raise ValueError("[VALIDATION_ERROR] --color and --transparent true cannot be used together")
             if not args.color and not transparent:
                 raise ValueError("[VALIDATION_ERROR] --transparent false requires --color")
+
+        token = get_token()
+
+        if args.command == 'remove-bg':
+            log('info', 'remove-bg')
             url_or_id = ensure_url_or_id(args.input, token)
             payload = {
                 'image_url': url_or_id,
@@ -261,7 +274,8 @@ def main():
         sys.exit(1)
     except requests.exceptions.ConnectionError as e:
         log('error', f'{args.command} failed', {'error': str(e)})
-        print(redact_secrets(f"[NETWORK_ERROR] {e}"), file=sys.stderr)
+        msg = "[TIMEOUT] Request timed out" if _is_read_timeout(e) else f"[NETWORK_ERROR] {e}"
+        print(redact_secrets(msg), file=sys.stderr)
         sys.exit(1)
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else '?'

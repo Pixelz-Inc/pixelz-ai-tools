@@ -62,7 +62,7 @@ def test_error_status_is_formatted_as_http_prefix():
     try:
         mod._checked(_response(503, {'message': 'upstream down'}))
     except requests.exceptions.HTTPError as e:
-        assert mod._format_error('list_templates', e).startswith('Error: [HTTP_503]')
+        assert mod._format_error('list_templates', e).startswith('[HTTP_503]')
     else:
         pytest.fail("expected HTTPError")
 

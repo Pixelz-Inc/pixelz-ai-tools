@@ -1,3 +1,6 @@
+# Where the user ran us from, before Push-Location below: a relative target path means what they typed.
+$OrigDir = (Get-Location).Path
+
 # Determine project root based on script location
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
@@ -57,6 +60,16 @@ function Invoke-Checked([string]$What, [scriptblock]$Command) {
     if ($LASTEXITCODE -ne 0) { Stop-Install "$What failed." }
 }
 
+# Accept a path the way people paste it: quoted ("Copy as path"), with a trailing slash (which
+# Windows PowerShell 5.1 would pass to native commands as an escaped quote), or relative to the
+# directory the installer was started from.
+function Resolve-UserPath([string]$Path) {
+    $p = $Path.Trim().Trim('"').Trim("'").TrimEnd('\', '/')
+    if ($p -match '^[A-Za-z]:$') { $p += '\' }
+    if (-not [IO.Path]::IsPathRooted($p) -and -not $p.StartsWith('~')) { $p = Join-Path $OrigDir $p }
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($p)
+}
+
 # Copy .env.example to $Path unless a .env is already there.
 function New-EnvFile([string]$Path) {
     if (!(Test-Path $Path)) {
@@ -71,10 +84,18 @@ $langIdx = Show-Menu "Choose Programming Language:" @("Node.js", "Python")
 if ($langIdx -eq 0) {
     $langPref = "node"; $runtime = "node"
     Assert-Command "node" "Node.js"
+    # process.loadEnvFile and fs.openAsBlob are stable from 22.21; earlier 22.x mostly works.
+    # Compared here rather than in `node -e`: PowerShell 5.1 strips the inner quotes from native
+    # command arguments, which turned split(".") into a syntax error.
+    $nodeVersion = [version](node -p process.versions.node)
+    if ($nodeVersion -lt [version]'22.21.0') { Write-Host "WARNING: Node.js v$nodeVersion is older than the supported v22.21." -ForegroundColor Yellow }
     $helperScript = Join-Path $ScriptDir "agent-config.mjs"
 } else {
     $langPref = "python"; $runtime = "python"
     Assert-Command "python" "Python"
+    # The `python` on PATH can be the Microsoft Store placeholder, which exists but only opens the Store.
+    python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+    if ($LASTEXITCODE -ne 0) { Stop-Install "Python 3.10+ is required for the Python track ('python' may be the Microsoft Store placeholder)." }
     # `python -m pip` rather than `pip`: the dependencies must land in the interpreter the
     # tools will actually run with.
     python -m pip --version *> $null
@@ -83,7 +104,9 @@ if ($langIdx -eq 0) {
     # 7-day release quarantine, as pnpm-workspace.yaml does for Node. The requirements files pin
     # only direct dependencies, so this is what holds the transitive ones (mcp pulls in ~30) back.
     if ((python -m pip install --help 2>$null) -match '--uploaded-prior-to') {
-        $env:PIP_UPLOADED_PRIOR_TO = [DateTime]::UtcNow.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        # Invariant culture: ':' in a format string is the culture's time separator, so e.g. fi-FI
+        # produced 14.03.46, which pip rejects - failing every pip install below.
+        $env:PIP_UPLOADED_PRIOR_TO = [DateTime]::UtcNow.AddDays(-7).ToString("yyyy-MM-dd'T'HH':'mm':'ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
     } else {
         Write-Host "WARNING: pip older than 26.0 cannot enforce the 7-day release quarantine." -ForegroundColor Yellow
         Write-Host "         Upgrade with: python -m pip install --upgrade pip" -ForegroundColor Yellow
@@ -113,7 +136,7 @@ if ($scopeIdx -eq 1) {
     Write-Host "`nEnter local target directory path: " -NoNewline
     $targetPath = Read-Host
     if ([string]::IsNullOrWhiteSpace($targetPath)) { Stop-Install "No path provided." }
-    $targetPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($targetPath)
+    try { $targetPath = Resolve-UserPath $targetPath } catch { Stop-Install "Not a usable path: $targetPath" }
     if (!(Test-Path $targetPath)) {
         New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
     }
@@ -180,8 +203,8 @@ if ($track -eq "mcp") {
 
         # The Node CLIs use only Node built-ins, so there is nothing to install for them.
         if ($langPref -eq "python") {
-            Copy-Item (Join-Path $ProjectRoot "requirements.txt") (Join-Path $pixelzDir "requirements.txt") -Force
-            Invoke-Checked "pip install" { python -m pip install -r (Join-Path $pixelzDir "requirements.txt") }
+            # Python packages go into the interpreter, so nothing about them belongs in .pixelz\.
+            Invoke-Checked "pip install" { python -m pip install -r (Join-Path $ProjectRoot "requirements.txt") }
         }
         # The CLIs load .env from three levels above cli.js, i.e. .pixelz\.env.
         $cliRoot = Join-Path $pixelzDir "cli-tools"

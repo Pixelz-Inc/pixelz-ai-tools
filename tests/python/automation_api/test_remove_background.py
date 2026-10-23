@@ -19,7 +19,11 @@ def _call(mod, **kwargs):
     ok.json.return_value = {'job_id': 'job-1'}
     with patch.object(mod, 'get_token', return_value='tok'), \
          patch.object(mod._session, 'post', return_value=ok) as post:
-        result = mod.remove_background(imagePath=IMG, **kwargs)
+        try:
+            result = mod.remove_background(imagePath=IMG, **kwargs)
+        except mod.ToolError as e:
+            # Tool failures are raised so the MCP result carries isError: true.
+            result = str(e)
     return result, (post.call_args.kwargs['json'] if post.called else None)
 
 

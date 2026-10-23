@@ -255,6 +255,90 @@ for (const h of helpers) {
             expect(settings).toEqual({ theme: 'x', mcpServers: { mine: { command: 'm' } } });
         }, 30_000);
 
+        // ---- data safety: these are the user's files ----
+
+        it('keeps the ORIGINAL file as the backup, even after a second install', async () => {
+            const file = path.join(home, '.cursor', 'mcp.json');
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            const original = '{\r\n    "theme": "mine"\r\n}\r\n';
+            fs.writeFileSync(file, original);
+            await run(h, ['register-mcp', '--agent', 'cursor', '--scope', 'global', ...MCP]);
+            await run(h, ['register-mcp', '--agent', 'cursor', '--scope', 'global', ...MCP]);
+            expect(fs.readFileSync(`${file}.pixelz-backup`, 'utf8')).toBe(original);
+            // ...and the rewrite keeps the file's CRLF line endings.
+            const now = fs.readFileSync(file, 'utf8');
+            expect(now).toContain('\r\n');
+            expect(now.replace(/\r\n/g, '')).not.toContain('\n');
+        }, 30_000);
+
+        for (const [what, bytes] of [
+            ['a cp1252 file', Buffer.from('{"note": "caf\xe9"}', 'latin1')],
+            ['a UTF-16 file', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('{"a": 1}', 'utf16le')])],
+            ['mcpServers that is not an object', Buffer.from('{"mcpServers": "oops"}')],
+            ['an integer JavaScript would round', Buffer.from('{"id": 12345678901234567890}')],
+        ] as const) {
+            it(`leaves ${what} untouched and prints the entries instead`, async () => {
+                const file = path.join(home, '.cursor', 'mcp.json');
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                fs.writeFileSync(file, bytes);
+                const r = await run(h, ['register-mcp', '--agent', 'cursor', '--scope', 'global', ...MCP]);
+                expect(r.code).toBe(0);
+                expect(r.stdout).toContain('WARNING');
+                expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+                const u = await run(h, ['unregister-mcp', '--agent', 'cursor', '--scope', 'global']);
+                expect(u.code, u.stderr).toBe(0);
+                expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+            }, 30_000);
+        }
+
+        describe('codex config.toml', () => {
+            const file = () => path.join(home, '.codex', 'config.toml');
+            const write = (text: string) => { fs.mkdirSync(path.dirname(file()), { recursive: true }); fs.writeFileSync(file(), text); };
+
+            it('leaves a pixelz server written as an inline table alone', async () => {
+                const original = '[mcp_servers]\npixelz-platform = { command = "x" }\n';
+                write(original);
+                const r = await run(h, ['register-mcp', '--agent', 'codex', '--scope', 'global', ...MCP]);
+                expect(r.stdout).toContain('WARNING');
+                expect(fs.readFileSync(file(), 'utf8')).toBe(original);
+            }, 30_000);
+
+            it("keeps the comments above the user's next table", async () => {
+                await run(h, ['register-mcp', '--agent', 'codex', '--scope', 'global', ...MCP]);
+                fs.appendFileSync(file(), '\n# my github server\n[mcp_servers.github]\ncommand = "gh"\n');
+                await run(h, ['register-mcp', '--agent', 'codex', '--scope', 'global', ...MCP]);
+                const text = fs.readFileSync(file(), 'utf8');
+                expect(text).toMatch(/# my github server\n\[mcp_servers\.github\]/);
+                expect(text.split('[mcp_servers.pixelz-platform]').length - 1).toBe(1);
+            }, 30_000);
+
+            it('removes sub-tables a user added under our servers', async () => {
+                await run(h, ['register-mcp', '--agent', 'codex', '--scope', 'global', ...MCP]);
+                fs.appendFileSync(file(), '\n[mcp_servers.pixelz-platform.env_http_headers]\nX = "1"\n');
+                await run(h, ['unregister-mcp', '--agent', 'codex', '--scope', 'global']);
+                expect(fs.existsSync(file()) ? fs.readFileSync(file(), 'utf8') : '').not.toContain('pixelz');
+            }, 30_000);
+        });
+
+        it("in-use: reports another agent still using the project's .pixelz/", async () => {
+            const cliRoot = path.join(target, '.pixelz', 'cli-tools');
+            await run(h, ['install-skills', '--agent', 'claude', '--scope', 'local', '--target', target, '--src', SKILLS_SRC, '--cli-root', cliRoot, '--runtime', 'node']);
+            await run(h, ['register-mcp', '--agent', 'cursor', '--scope', 'local', '--target', target, ...MCP, '--dotenv', path.join(target, '.pixelz', '.env')]);
+            const both = await run(h, ['in-use', '--target', target, '--src', SKILLS_SRC]);
+            expect(both.stdout.trim().split(/\r?\n/).sort()).toEqual(['claude', 'cursor']);
+            const others = await run(h, ['in-use', '--target', target, '--src', SKILLS_SRC, '--exclude', 'claude']);
+            expect(others.stdout.trim()).toBe('cursor');
+            await run(h, ['unregister-mcp', '--agent', 'cursor', '--scope', 'local', '--target', target]);
+            const none = await run(h, ['in-use', '--target', target, '--src', SKILLS_SRC, '--exclude', 'claude']);
+            expect(none.stdout.trim()).toBe('');
+        }, 60_000);
+
+        it('remove-skills says when the folder is shared with other agents', async () => {
+            await run(h, ['install-skills', '--agent', 'universal', '--scope', 'global', '--src', SKILLS_SRC, '--cli-root', '/x', '--runtime', 'node']);
+            const r = await run(h, ['remove-skills', '--agent', 'universal', '--scope', 'global', '--src', SKILLS_SRC]);
+            expect(r.stdout).toContain('is shared with OpenAI Codex');
+        }, 30_000);
+
         it('rejects an unknown agent', async () => {
             const r = await run(h, ['skills-dir', '--agent', 'nope', '--scope', 'global']);
             expect(r.code).toBe(1);

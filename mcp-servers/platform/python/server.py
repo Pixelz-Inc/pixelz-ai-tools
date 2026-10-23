@@ -2,12 +2,17 @@ import os
 import json
 import re
 import requests
+from typing import Annotated
+from pydantic import Field
 from urllib.parse import quote, quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
 from mcp.server.caching import CacheHint
+# Raised (not returned) so the result carries isError: true, as the Node servers' do; the SDK
+# passes a ToolError's message through, where any other exception becomes 'Error executing tool'.
+from mcp.server.mcpserver.exceptions import ToolError
 
 _dotenv_path = os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env'))
 load_dotenv(_dotenv_path)
@@ -20,9 +25,18 @@ mcp = MCPServer(
 )
 BASE_URL = 'https://api.pixelz.com/REST.svc/JSON'
 REQUEST_TIMEOUT = 90
+
+def _is_read_timeout(e):
+    """requests reports a timeout while reading the body as ConnectionError(ReadTimeoutError)."""
+    import urllib3
+    return bool(e.args) and isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError)
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True)
+# raise_on_status=False: once retries run out, hand back the last response so raise_for_status()
+# reports [HTTP_<status>] (as Node does) instead of an uncategorized RetryError.
+# retry_after_max: the same 60 s ceiling as Node, so a huge Retry-After cannot park a call for hours.
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True,
+               raise_on_status=False, retry_after_max=60)
 _session = requests.Session()
 _session.mount('https://', HTTPAdapter(max_retries=_retry))
 _session.mount('http://', HTTPAdapter(max_retries=_retry))
@@ -131,7 +145,8 @@ def _format_error(tool_name, e):
     if isinstance(e, requests.exceptions.Timeout):
         msg = f"[TIMEOUT] Request timed out after {REQUEST_TIMEOUT} seconds"
     elif isinstance(e, requests.exceptions.ConnectionError):
-        msg = f"[NETWORK_ERROR] {e}"
+        msg = (f"[TIMEOUT] Request timed out after {REQUEST_TIMEOUT} seconds" if _is_read_timeout(e)
+               else f"[NETWORK_ERROR] {e}")
     elif isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
         status = e.response.status_code
         try:
@@ -139,13 +154,17 @@ def _format_error(tool_name, e):
             msg = f"[HTTP_{status}] {json.dumps(body)}"
         except Exception:
             msg = f"[HTTP_{status}] {e.response.text}"
+    elif isinstance(e, requests.exceptions.JSONDecodeError):
+        # A 2xx that is not JSON is a proxy or login page, not a bad argument.
+        msg = f"[API_ERROR] Expected a JSON response: {e}"
     elif isinstance(e, ValueError) and not str(e).startswith('[AUTH_ERROR]'):
         msg = f"[VALIDATION_ERROR] {e}"
     else:
         msg = str(e)
     msg = redact_secrets(msg)
     log('error', f'{tool_name} failed', {'error': msg})
-    return f"Error: {msg}"
+    # No "Error: " prefix: the SDK already reports a ToolError as "Error executing tool <name>: ...".
+    return msg
 
 STATUS_ALIASES = {
     'new': '10', 'in production': '60', 'production finished': '70', 'delivered': '80'
@@ -170,10 +189,10 @@ def list_templates() -> str:
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('list_templates', e)
+        raise ToolError(_format_error('list_templates', e)) from e
 
 @mcp.tool()
-def get_template_detail(templateId: str) -> str:
+def get_template_detail(templateId: Annotated[str, Field(description="Numeric template ID from list_templates")]) -> str:
     """Get the full technical configuration of a specific Pixelz template, including output format, background type, margins, alignment, and price per image."""
     try:
         _validate_required_str(templateId, 'templateId')
@@ -183,16 +202,16 @@ def get_template_detail(templateId: str) -> str:
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('get_template_detail', e)
+        raise ToolError(_format_error('get_template_detail', e)) from e
 
 @mcp.tool()
-def upload_image(imagePath: str, templateId: str, customerImageId: str = None, productId: str = None,
-                 imageCallbackURL: str = None, comment: str = None, markupImageUrl: str = None,
-                 customerFolder: str = None, imageDeadlineDateTimeUTC: str = None,
+def upload_image(imagePath: Annotated[str, Field(description="Local file path or public URL of the primary image")], templateId: Annotated[str, Field(description="Numeric specification ID. Use list_templates to find the right one.")], customerImageId: str = None, productId: str = None,
+                 imageCallbackURL: Annotated[str, Field(description="Webhook URL for completion notification")] = None, comment: Annotated[str, Field(description="Instructions for the retouching expert")] = None, markupImageUrl: str = None,
+                 customerFolder: str = None, imageDeadlineDateTimeUTC: Annotated[str, Field(description="yyyy-MM-dd HH:mm:ss, must be at least 24h in future")] = None,
                  imageURL2: str = None, imageURL3: str = None, imageURL4: str = None, imageURL5: str = None,
-                 colorReferenceFileURL: str = None, swatchImageURL: str = None, swatchColorCode: str = None,
-                 markerX: float = None, markerY: float = None, outputFileName: str = None,
-                 customerImageColorID: str = None, colorwayIds: list[int] = None) -> str:
+                 colorReferenceFileURL: str = None, swatchImageURL: str = None, swatchColorCode: Annotated[str, Field(description="Hex color like #FFFFFF")] = None,
+                 markerX: int = None, markerY: int = None, outputFileName: str = None,
+                 customerImageColorID: str = None, colorwayIds: Annotated[list[int], Field(description="Array of color library IDs from add_color_library")] = None) -> str:
     """Submit an image for professional manual retouching. Accepts a local file path or public URL — local files are uploaded to S3 automatically. Returns an ImageTicket GUID; use get_image_status to track progress."""
     try:
         _validate_required_str(imagePath, 'imagePath')
@@ -217,10 +236,12 @@ def upload_image(imagePath: str, templateId: str, customerImageId: str = None, p
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('upload_image', e)
+        raise ToolError(_format_error('upload_image', e)) from e
 
 @mcp.tool()
-def white_glove_service(imagePath: str, comment: str = None, markupImageUrl: str = None,
+def white_glove_service(imagePath: Annotated[str, Field(description="Local file path or public URL")], comment: Annotated[str, Field(description="Instructions or context for the specialist")] = None, markupImageUrl: str = None,
+                        imageURL2: str = None, imageURL3: str = None, imageURL4: str = None, imageURL5: str = None,
+                        colorReferenceFileURL: str = None,
                         customerImageId: str = None, productId: str = None,
                         customerFolder: str = None, imageCallbackURL: str = None) -> str:
     """Submit an image when you don't know which template to use. A Pixelz specialist manually selects the best settings. Accepts local file path or public URL."""
@@ -230,19 +251,20 @@ def white_glove_service(imagePath: str, comment: str = None, markupImageUrl: str
         url = ensure_url(imagePath)
         payload = {k: v for k, v in {
             **get_auth(), 'imageURL': url, 'comment': comment,
-            'markupImageUrl': markupImageUrl, 'customerImageId': customerImageId,
-            'productId': productId, 'customerFolder': customerFolder,
+            'markupImageUrl': markupImageUrl, 'imageURL2': imageURL2, 'imageURL3': imageURL3,
+            'imageURL4': imageURL4, 'imageURL5': imageURL5, 'colorReferenceFileURL': colorReferenceFileURL,
+            'customerImageId': customerImageId, 'productId': productId, 'customerFolder': customerFolder,
             'imageCallbackURL': imageCallbackURL
         }.items() if v is not None}
         data = _checked(_session.post(f"{BASE_URL}/WhiteGloveService", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('white_glove_service', e)
+        raise ToolError(_format_error('white_glove_service', e)) from e
 
 @mcp.tool()
-def stack_image(imagePath: str, templateId: str = None, customerImageId: str = None,
-                productId: str = None, imageCallbackURL: str = None,
+def stack_image(imagePath: Annotated[str, Field(description="Local file path or public URL")], templateId: str = None, customerImageId: str = None,
+                productId: Annotated[str, Field(description="Must be identical across all parts of the same stack")] = None, customerFolder: str = None, imageCallbackURL: str = None,
                 imageDeadlineDateTimeUTC: str = None) -> str:
     """Submit one part of a multi-image stack. All parts must share the same productId and be submitted within 5 minutes of each other. Accepts local file path or public URL."""
     try:
@@ -252,17 +274,17 @@ def stack_image(imagePath: str, templateId: str = None, customerImageId: str = N
         payload = {k: v for k, v in {
             **get_auth(), 'imageURL': url, 'templateId': templateId,
             'customerImageId': customerImageId, 'productId': productId,
-            'imageCallbackURL': imageCallbackURL,
+            'customerFolder': customerFolder, 'imageCallbackURL': imageCallbackURL,
             'imageDeadlineDateTimeUTC': imageDeadlineDateTimeUTC
         }.items() if v is not None}
         data = _checked(_session.post(f"{BASE_URL}/StackImage", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('stack_image', e)
+        raise ToolError(_format_error('stack_image', e)) from e
 
 @mcp.tool()
-def get_image_status(imageTicket: str, customerImageId: str = None) -> str:
+def get_image_status(imageTicket: Annotated[str, Field(description="GUID returned by upload_image or white_glove_service")], customerImageId: str = None) -> str:
     """Get the processing status of an uploaded image. Status codes: 10=New, 60=In Production, 70=Production Finished (QC), 80=Delivered. When status is 80 the FinalImagesURL is ready for download."""
     try:
         _validate_required_str(imageTicket, 'imageTicket')
@@ -273,12 +295,12 @@ def get_image_status(imageTicket: str, customerImageId: str = None) -> str:
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('get_image_status', e)
+        raise ToolError(_format_error('get_image_status', e)) from e
 
 @mcp.tool()
-def list_images(imageStatus: str = None, excludeImageStatus: str = None, productId: str = None,
-                fromDate: str = None, toDate: str = None, page: int = 1,
-                imagesPerPage: int = 10, sortBy: str = None, isDescending: str = None) -> str:
+def list_images(imageStatus: Annotated[str, Field(description="Filter by status code or name (10/new, 60/in production, 70/production finished, 80/delivered)")] = None, excludeImageStatus: Annotated[str, Field(description="Exclude by status code or name")] = None, productId: str = None,
+                fromDate: Annotated[str, Field(description="YYYY-MM-DD")] = None, toDate: Annotated[str, Field(description="YYYY-MM-DD")] = None, page: int = 1,
+                imagesPerPage: Annotated[int, Field(description="Max 100")] = 10, sortBy: str = None, isDescending: str = None) -> str:
     """Search and list images in the account. Status accepts codes or names: 10/new, 60/in production, 70/production finished, 80/delivered. Returns ticket IDs, statuses, and dates."""
     try:
         log('info', 'Tool called: list_images')
@@ -293,10 +315,10 @@ def list_images(imageStatus: str = None, excludeImageStatus: str = None, product
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('list_images', e)
+        raise ToolError(_format_error('list_images', e)) from e
 
 @mcp.tool()
-def count_images(imageStatus: str = None, fromDate: str = None, toDate: str = None) -> str:
+def count_images(imageStatus: Annotated[str, Field(description="Filter by status code or name (10/new, 60/in production, 70/production finished, 80/delivered)")] = None, fromDate: Annotated[str, Field(description="YYYY-MM-DD")] = None, toDate: Annotated[str, Field(description="YYYY-MM-DD")] = None) -> str:
     """Get a count of images matching the given filters. Faster than list_images when you only need a total number. Status accepts codes or names: 10/new, 60/in production, 70/production finished, 80/delivered."""
     try:
         log('info', 'Tool called: count_images')
@@ -306,7 +328,7 @@ def count_images(imageStatus: str = None, fromDate: str = None, toDate: str = No
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('count_images', e)
+        raise ToolError(_format_error('count_images', e)) from e
 
 @mcp.tool()
 def list_product_ids(page: int = 1, perPage: int = 10) -> str:
@@ -317,23 +339,25 @@ def list_product_ids(page: int = 1, perPage: int = 10) -> str:
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('list_product_ids', e)
+        raise ToolError(_format_error('list_product_ids', e)) from e
 
 @mcp.tool()
-def delete_image(imageTicket: str) -> str:
+def delete_image(imageTicket: str, customerImageId: str = None) -> str:
     """Cancel and delete an image processing request. Only possible before the image enters production (status < 60). Confirm the ticket with the user before calling."""
     try:
         _validate_required_str(imageTicket, 'imageTicket')
         validate_id(imageTicket, 'imageTicket')
         log('info', 'Tool called: delete_image', {'imageTicket': imageTicket})
-        data = _checked(_session.delete(f"{BASE_URL}/Image/{imageTicket}", json=get_auth(), timeout=REQUEST_TIMEOUT))
+        # customerImageId is what the API needs to delete a 'nonticket' image.
+        payload = {**get_auth(), **({'customerImageId': customerImageId} if customerImageId else {})}
+        data = _checked(_session.delete(f"{BASE_URL}/Image/{imageTicket}", json=payload, timeout=REQUEST_TIMEOUT))
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('delete_image', e)
+        raise ToolError(_format_error('delete_image', e)) from e
 
 @mcp.tool()
-def reject_image(imageTicket: str, comment: str, markupImageUrl: str = None, customerImageId: str = None) -> str:
+def reject_image(imageTicket: str, comment: Annotated[str, Field(description="Clear description of what needs fixing \u2014 sent directly to the retouching expert")], markupImageUrl: Annotated[str, Field(description="URL to an annotated image showing exactly what needs correcting")] = None, customerImageId: str = None) -> str:
     """Request a correction (redo) for a delivered image. Only valid when status is 80 (Delivered). The image re-enters the production queue at no extra charge. comment is sent directly to the retouching expert."""
     try:
         _validate_required_str(imageTicket, 'imageTicket')
@@ -345,7 +369,7 @@ def reject_image(imageTicket: str, comment: str, markupImageUrl: str = None, cus
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('reject_image', e)
+        raise ToolError(_format_error('reject_image', e)) from e
 
 @mcp.tool()
 def get_contact() -> str:
@@ -356,10 +380,10 @@ def get_contact() -> str:
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('get_contact', e)
+        raise ToolError(_format_error('get_contact', e)) from e
 
 @mcp.tool()
-def get_invoices(fromDate: str = None, toDate: str = None, page: int = 1, returnUrl: str = None) -> str:
+def get_invoices(fromDate: Annotated[str, Field(description="YYYY-MM-DD")] = None, toDate: Annotated[str, Field(description="YYYY-MM-DD")] = None, page: int = 1, returnUrl: Annotated[str, Field(description="Redirect URL after payment completion")] = None) -> str:
     """Retrieve billing statements. Returns invoice amounts, dates, and payment URLs. returnUrl is a redirect URL after payment completion."""
     try:
         log('info', 'Tool called: get_invoices')
@@ -368,10 +392,10 @@ def get_invoices(fromDate: str = None, toDate: str = None, page: int = 1, return
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('get_invoices', e)
+        raise ToolError(_format_error('get_invoices', e)) from e
 
 @mcp.tool()
-def add_color_library(imagesPath: list[str]) -> str:
+def add_color_library(imagesPath: Annotated[list[str], Field(description="Array of local file paths or public URLs of color swatch images")]) -> str:
     """Register color reference images (swatches) for use with color matching. Returns colorwayIds that can be passed to upload_image. Accepts local file paths or public URLs — local files are uploaded to S3 automatically."""
     try:
         log('info', 'Tool called: add_color_library', {'count': len(imagesPath)})
@@ -383,7 +407,7 @@ def add_color_library(imagesPath: list[str]) -> str:
         check_api_error(data)
         return json.dumps(data, indent=2)
     except Exception as e:
-        return _format_error('add_color_library', e)
+        raise ToolError(_format_error('add_color_library', e)) from e
 
 if __name__ == "__main__":
     mcp.run()

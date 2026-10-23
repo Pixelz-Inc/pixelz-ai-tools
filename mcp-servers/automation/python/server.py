@@ -5,12 +5,17 @@ import time
 import threading
 import mimetypes
 import requests
+from typing import Annotated
+from pydantic import Field
 from urllib.parse import quote, quote_plus
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
 from mcp.server.caching import CacheHint
+# Raised (not returned) so the result carries isError: true, as the Node servers' do; the SDK
+# passes a ToolError's message through, where any other exception becomes 'Error executing tool'.
+from mcp.server.mcpserver.exceptions import ToolError
 
 _dotenv_path = os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env'))
 load_dotenv(_dotenv_path)
@@ -24,9 +29,18 @@ mcp = MCPServer(
 AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token'
 BASE_URL = 'https://automation-api.pixelz.com/v1'
 REQUEST_TIMEOUT = 90
+
+def _is_read_timeout(e):
+    """requests reports a timeout while reading the body as ConnectionError(ReadTimeoutError)."""
+    import urllib3
+    return bool(e.args) and isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError)
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True)
+# raise_on_status=False: once retries run out, hand back the last response so raise_for_status()
+# reports [HTTP_<status>] (as Node does) instead of an uncategorized RetryError.
+# retry_after_max: the same 60 s ceiling as Node, so a huge Retry-After cannot park a call for hours.
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True,
+               raise_on_status=False, retry_after_max=60)
 _session = requests.Session()
 _session.mount('https://', HTTPAdapter(max_retries=_retry))
 _session.mount('http://', HTTPAdapter(max_retries=_retry))
@@ -128,7 +142,8 @@ def _format_error(tool_name, e):
     if isinstance(e, requests.exceptions.Timeout):
         msg = f"[TIMEOUT] Request timed out after {REQUEST_TIMEOUT} seconds"
     elif isinstance(e, requests.exceptions.ConnectionError):
-        msg = f"[NETWORK_ERROR] {e}"
+        msg = (f"[TIMEOUT] Request timed out after {REQUEST_TIMEOUT} seconds" if _is_read_timeout(e)
+               else f"[NETWORK_ERROR] {e}")
     elif isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
         status = e.response.status_code
         try:
@@ -136,13 +151,17 @@ def _format_error(tool_name, e):
             msg = f"[HTTP_{status}] {json.dumps(body)}"
         except Exception:
             msg = f"[HTTP_{status}] {e.response.text}"
+    elif isinstance(e, requests.exceptions.JSONDecodeError):
+        # A 2xx that is not JSON is a proxy or login page, not a bad argument.
+        msg = f"[API_ERROR] Expected a JSON response: {e}"
     elif isinstance(e, ValueError) and not str(e).startswith('[AUTH_ERROR]'):
         msg = f"[VALIDATION_ERROR] {e}"
     else:
         msg = str(e)
     msg = redact_secrets(msg)
     log('error', f'{tool_name} failed', {'error': msg})
-    return f"Error: {msg}"
+    # No "Error: " prefix: the SDK already reports a ToolError as "Error executing tool <name>: ...".
+    return msg
 
 def _validate_required_str(value, name):
     if not value or not str(value).strip():
@@ -157,9 +176,9 @@ def _validate_crop_location(value, name):
         raise ValueError(f"{name}: must be one of {', '.join(CROP_LOCATIONS)}")
 
 @mcp.tool()
-def remove_background(imagePath: str, backgroundColor: str = None, transparentBackground: bool = None,
-                      featherWidth: float = None, trimapUrl: str = None, callbackUrl: str = None,
-                      sync: bool = False) -> str:
+def remove_background(imagePath: Annotated[str, Field(description="Local file path or public URL")], backgroundColor: Annotated[str, Field(description="Hex color for replacement background (e.g. #FFFFFF). Mutually exclusive with transparentBackground.")] = None, transparentBackground: Annotated[bool, Field(description="Return a transparent PNG. Defaults to true if backgroundColor is not set.")] = None,
+                      featherWidth: Annotated[float, Field(description="Soften subject edges. 0\u20131 = sharp, >1 = soft.")] = None, trimapUrl: Annotated[str, Field(description="URL of a trimap for improved edge quality. Generate one first with create_trimap.")] = None, callbackUrl: Annotated[str, Field(description="Webhook URL to receive result notification.")] = None,
+                      sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it \u2014 may time out on large images.")] = False) -> str:
     """AI-powered background removal. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0-1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Set sync=True only if the user explicitly requests it (risk of timeout)."""
     try:
         _validate_required_str(imagePath, 'imagePath')
@@ -186,10 +205,10 @@ def remove_background(imagePath: str, backgroundColor: str = None, transparentBa
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return _format_error('remove_background', e)
+        raise ToolError(_format_error('remove_background', e)) from e
 
 @mcp.tool()
-def color_matching(imagePath: str, colorMarkers: list, callbackUrl: str = None, sync: bool = False) -> str:
+def color_matching(imagePath: Annotated[str, Field(description="Local file path or public URL")], colorMarkers: Annotated[list, Field(description="Array of marker objects. Each requires x_coordinate, y_coordinate, and either swatch_color_code (hex) or swatch_image (object with swatch_image_url, x_coordinate, y_coordinate).")], callbackUrl: str = None, sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
     """AI-powered color correction. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. colorMarkers is an array of objects with x_coordinate, y_coordinate, and either swatch_color_code (hex) or swatch_image. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
@@ -203,11 +222,11 @@ def color_matching(imagePath: str, colorMarkers: list, callbackUrl: str = None, 
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return _format_error('color_matching', e)
+        raise ToolError(_format_error('color_matching', e)) from e
 
 @mcp.tool()
-def create_mask(imagePath: str, featherWidth: float = None, trimapUrl: str = None, callbackUrl: str = None,
-                sync: bool = False) -> str:
+def create_mask(imagePath: Annotated[str, Field(description="Local file path or public URL")], featherWidth: Annotated[float, Field(description="Soften mask edges. 0\u20131 = sharp, >1 = soft.")] = None, trimapUrl: Annotated[str, Field(description="URL of a trimap for improved accuracy on complex edges.")] = None, callbackUrl: str = None,
+                sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
     """Generate a greyscale silhouette mask (white=subject, black=background). Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
@@ -221,10 +240,10 @@ def create_mask(imagePath: str, featherWidth: float = None, trimapUrl: str = Non
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return _format_error('create_mask', e)
+        raise ToolError(_format_error('create_mask', e)) from e
 
 @mcp.tool()
-def create_trimap(imagePath: str, callbackUrl: str = None, sync: bool = False) -> str:
+def create_trimap(imagePath: Annotated[str, Field(description="Local file path or public URL")], callbackUrl: str = None, sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
     """Generate a trimap for complex subjects (hair, fur, transparent edges). Default: async — returns job_id. Pass result trimapUrl to remove_background or create_mask for higher quality edges. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
@@ -236,11 +255,11 @@ def create_trimap(imagePath: str, callbackUrl: str = None, sync: bool = False) -
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return _format_error('create_trimap', e)
+        raise ToolError(_format_error('create_trimap', e)) from e
 
 @mcp.tool()
-def model_crop(imagePath: str, topCropLocation: str = None, bottomCropLocation: str = None,
-               callbackUrl: str = None, sync: bool = False) -> str:
+def model_crop(imagePath: Annotated[str, Field(description="Local file path or public URL")], topCropLocation: str = None, bottomCropLocation: str = None,
+               callbackUrl: str = None, sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
     """Crop a model photograph using anatomical landmarks. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Valid locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
@@ -254,7 +273,7 @@ def model_crop(imagePath: str, topCropLocation: str = None, bottomCropLocation: 
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return _format_error('model_crop', e)
+        raise ToolError(_format_error('model_crop', e)) from e
 
 @mcp.tool()
 def get_job_status(jobId: str) -> str:
@@ -266,7 +285,7 @@ def get_job_status(jobId: str) -> str:
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return _format_error('get_job_status', e)
+        raise ToolError(_format_error('get_job_status', e)) from e
 
 @mcp.tool()
 def get_webhook_public_key() -> str:
@@ -277,7 +296,7 @@ def get_webhook_public_key() -> str:
         r.raise_for_status()
         return json.dumps(r.json(), indent=2)
     except Exception as e:
-        return _format_error('get_webhook_public_key', e)
+        raise ToolError(_format_error('get_webhook_public_key', e)) from e
 
 if __name__ == "__main__":
     mcp.run()

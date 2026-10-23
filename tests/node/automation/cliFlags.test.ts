@@ -19,6 +19,8 @@ const PY_CLI = path.join(REPO_ROOT, 'cli-tools/automation/python/cli.py');
 let server: Server;
 let baseUrl: string;
 let lastRequest: { path: string; body: any; headers: Record<string, any> };
+// Token exchanges are counted separately: a validation failure must not even reach /token.
+let tokenHits = 0;
 
 beforeAll(async () => {
     server = createServer((req, res) => {
@@ -27,6 +29,7 @@ beforeAll(async () => {
         req.on('end', () => {
             const url = new URL(req.url!, 'http://localhost');
             if (url.pathname.endsWith('/token')) {
+                tokenHits++;
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ access_token: 'stub-token', expires_in: 3600 }));
                 return;
@@ -84,8 +87,23 @@ for (const [label, run] of [['node', runNode], ['python', runPy]] as const) {
         // The API spec: choose exactly one of background_color / transparent_background.
         it('remove-bg rejects --color with --transparent true before sending anything', async () => {
             lastRequest = undefined as any;
+            tokenHits = 0;
             await expect(run(['remove-bg', IMG, '--color', '#FFFFFF', '--transparent', 'true']))
                 .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('[VALIDATION_ERROR]') });
+            expect(lastRequest).toBeUndefined();
+            expect(tokenHits).toBe(0);
+        });
+
+        it('--sync before the image does not swallow it', async () => {
+            await run(['remove-bg', '--sync', IMG]);
+            expect(lastRequest.body.image_url).toBe(IMG);
+            expect(lastRequest.headers['respond-mode']).toBeUndefined();
+        });
+
+        it('rejects a mistyped flag instead of dropping it', async () => {
+            lastRequest = undefined as any;
+            await expect(run(['create-mask', IMG, '--feathr', '3']))
+                .rejects.toMatchObject({ stderr: expect.stringContaining('feathr') });
             expect(lastRequest).toBeUndefined();
         });
 
