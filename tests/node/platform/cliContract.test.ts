@@ -68,6 +68,9 @@ const tracks = [
     { label: 'python', cmd: 'python', argv: [PY_CLI] },
 ] as const;
 
+// Every group below spawns slow failure runs (Python's connect retries cost ~15 s each on
+// Windows) and none share mutable state, so all of them run side by side.
+describe.concurrent('CLI process contract', () => {
 for (const { label, cmd, argv } of tracks) {
     describe.concurrent(`platform CLI (${label}) — process contract`, () => {
         // One failing run feeds three assertions: each run pays Python's connect retries (~15 s
@@ -156,4 +159,5 @@ describe('automation CLI — credential redaction and error contract', () => {
             expect(r.code).toBe(1);
         }, 120_000);
     }
+});
 });

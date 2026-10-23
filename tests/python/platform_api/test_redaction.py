@@ -41,6 +41,7 @@ def test_redacts_raw_values_too():
     result = mod.redact_secrets(f"Auth failed for {AWKWARD_EMAIL} with key {AWKWARD_KEY}")
     assert AWKWARD_KEY not in result
     assert AWKWARD_EMAIL not in result
+    assert '<REDACTED>' in result
 
 
 @patch.dict(os.environ, ENV, clear=False)

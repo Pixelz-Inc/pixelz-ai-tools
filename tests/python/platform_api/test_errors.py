@@ -6,19 +6,6 @@ from conftest import load_platform_server
 
 @patch.dict(os.environ, {
     'PIXELZ_DOTENV_PATH': '/dev/null',
-    'PIXELZ_PLATFORM_EMAIL': 'secret@example.com',
-    'PIXELZ_PLATFORM_API_KEY': 'my_api_key_123',
-}, clear=False)
-def test_redact_secrets_hides_credentials():
-    mod = load_platform_server()
-    result = mod.redact_secrets('Auth failed for secret@example.com with key my_api_key_123')
-    assert 'secret@example.com' not in result
-    assert 'my_api_key_123' not in result
-    assert '<REDACTED>' in result
-
-
-@patch.dict(os.environ, {
-    'PIXELZ_DOTENV_PATH': '/dev/null',
     'PIXELZ_PLATFORM_EMAIL': 'test@example.com',
     'PIXELZ_PLATFORM_API_KEY': 'key123',
 }, clear=False)

@@ -14,6 +14,7 @@ describe('Platform Zod Schemas', () => {
             });
             expect(result.imagePath).toBe('/path/to/image.jpg');
             expect(result.templateId).toBe('123');
+            expect(result.colorwayIds).toBeUndefined();
         });
 
         it('accepts valid input with optional fields', () => {
@@ -69,13 +70,6 @@ describe('Platform Zod Schemas', () => {
                 imagePath: '/img.jpg', templateId: '123', colorwayIds: [1, 2, 3]
             });
             expect(result.colorwayIds).toEqual([1, 2, 3]);
-        });
-
-        it('accepts upload without colorwayIds', () => {
-            const result = UploadImageSchema.parse({
-                imagePath: '/img.jpg', templateId: '123'
-            });
-            expect(result.colorwayIds).toBeUndefined();
         });
 
         it('rejects non-number values in colorwayIds', () => {

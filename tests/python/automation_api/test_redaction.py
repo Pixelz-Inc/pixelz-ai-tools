@@ -38,6 +38,7 @@ def test_redacts_raw_values_too():
     result = mod.redact_secrets(f"auth failed for {AWKWARD_ID} / {AWKWARD_SECRET}")
     assert AWKWARD_ID not in result
     assert AWKWARD_SECRET not in result
+    assert '<REDACTED>' in result
 
 
 @patch.dict(os.environ, ENV, clear=False)
@@ -53,5 +54,8 @@ def test_param_name_backstop_redacts_unknown_encoding():
 def test_bearer_token_still_redacted():
     """The JWT pattern must survive the encoding-variant rewrite."""
     mod = load_automation_server()
-    jwt = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payloadpart.signaturepart'
-    assert jwt not in mod.redact_secrets(f"Authorization: Bearer {jwt}")
+    for jwt in ('eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payloadpart.signaturepart',
+                'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature'):
+        result = mod.redact_secrets(f"Authorization: Bearer {jwt}")
+        assert 'eyJ' not in result
+        assert '<REDACTED>' in result

@@ -38,30 +38,4 @@ describe('Platform — ensureUrl validation', () => {
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         await expect(mod.ensureUrl('.')).rejects.toThrow('Not a regular file');
     });
-
-    it('rejects nonexistent files', async () => {
-        const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
-        await expect(mod.ensureUrl('/nonexistent/file.jpg')).rejects.toThrow('Local file not found');
-    });
-});
-
-describe('Platform — checkApiError', () => {
-    beforeEach(() => {
-        vi.unstubAllEnvs();
-        vi.stubEnv('NODE_ENV', 'test');
-        vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
-        vi.stubEnv('PIXELZ_PLATFORM_EMAIL', 'test@example.com');
-        vi.stubEnv('PIXELZ_PLATFORM_API_KEY', 'key123');
-        vi.resetModules();
-    });
-
-    it('does not throw for NoError', async () => {
-        const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
-        expect(() => mod.checkApiError({ ErrorCode: 'NoError' })).not.toThrow();
-    });
-
-    it('throws for error codes', async () => {
-        const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
-        expect(() => mod.checkApiError({ ErrorCode: 'InvalidTemplate', Message: 'Not found' })).toThrow('API_ERROR');
-    });
 });

@@ -11,13 +11,13 @@ describe('Platform — ensureUrl()', () => {
         vi.restoreAllMocks();
     });
 
-    it('passes HTTP URLs through unchanged', async () => {
+    it('passes HTTPS URLs through unchanged', async () => {
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         const result = await mod.ensureUrl('https://example.com/image.jpg');
         expect(result).toBe('https://example.com/image.jpg');
     });
 
-    it('passes HTTPS URLs through unchanged', async () => {
+    it('passes HTTP URLs through unchanged', async () => {
         const mod = await import('../../../mcp-servers/platform/node/src/index.ts');
         const result = await mod.ensureUrl('http://example.com/image.jpg');
         expect(result).toBe('http://example.com/image.jpg');

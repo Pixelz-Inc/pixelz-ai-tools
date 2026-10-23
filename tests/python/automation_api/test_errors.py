@@ -10,32 +10,6 @@ from conftest import load_automation_server
     'PIXELZ_AUTOMATION_CLIENT_ID': 'client123',
     'PIXELZ_AUTOMATION_CLIENT_SECRET': 'secret456',
 }, clear=False)
-def test_redact_secrets_hides_credentials():
-    mod = load_automation_server()
-    result = mod.redact_secrets('Error with client123 and secret456')
-    assert 'client123' not in result
-    assert 'secret456' not in result
-    assert '<REDACTED>' in result
-
-
-@patch.dict(os.environ, {
-    'PIXELZ_DOTENV_PATH': '/dev/null',
-    'PIXELZ_AUTOMATION_CLIENT_ID': 'client123',
-    'PIXELZ_AUTOMATION_CLIENT_SECRET': 'secret456',
-}, clear=False)
-def test_redact_secrets_hides_jwt():
-    mod = load_automation_server()
-    jwt = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature'
-    result = mod.redact_secrets(f'Bearer {jwt}')
-    assert 'eyJ' not in result
-    assert '<REDACTED>' in result
-
-
-@patch.dict(os.environ, {
-    'PIXELZ_DOTENV_PATH': '/dev/null',
-    'PIXELZ_AUTOMATION_CLIENT_ID': 'client123',
-    'PIXELZ_AUTOMATION_CLIENT_SECRET': 'secret456',
-}, clear=False)
 def test_format_error_timeout():
     import requests
     mod = load_automation_server()

@@ -47,13 +47,3 @@ def test_check_api_error_no_error():
     mod.check_api_error({'ErrorCode': 0})
     mod.check_api_error([{'id': 1}])
 
-
-@patch.dict(os.environ, {
-    'PIXELZ_DOTENV_PATH': '/dev/null',
-    'PIXELZ_PLATFORM_EMAIL': 'test@example.com',
-    'PIXELZ_PLATFORM_API_KEY': 'key123',
-}, clear=False)
-def test_check_api_error_raises_on_error():
-    mod = load_platform_server()
-    with pytest.raises(Exception, match='API_ERROR'):
-        mod.check_api_error({'ErrorCode': 'InvalidTemplate', 'Message': 'Not found'})
