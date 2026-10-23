@@ -1,52 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { z } from 'zod';
+import { describe, it, expect, vi } from 'vitest';
 
-// Test the Zod schemas directly — these mirror the schemas defined in the Platform MCP server.
-// We re-define them here to test in isolation without importing the full server module.
-
-const UploadImageSchema = z.object({
-    imagePath: z.string().min(1),
-    templateId: z.string().min(1),
-    imageURL2: z.string().optional(), imageURL3: z.string().optional(),
-    imageURL4: z.string().optional(), imageURL5: z.string().optional(),
-    colorReferenceFileURL: z.string().optional(),
-    imageCallbackURL: z.string().optional(),
-    customerImageId: z.string().optional(),
-    productId: z.string().optional(),
-    customerFolder: z.string().optional(),
-    imageDeadlineDateTimeUTC: z.string().optional(),
-    comment: z.string().optional(),
-    markupImageUrl: z.string().optional(),
-    swatchImageURL: z.string().optional(),
-    swatchColorCode: z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a hex color like #FFFFFF').optional(),
-    markerX: z.number().optional(), markerY: z.number().optional(),
-    outputFileName: z.string().optional(),
-    customerImageColorID: z.string().optional(),
-    colorwayIds: z.array(z.number()).optional(),
-});
-
-const RejectImageSchema = z.object({
-    imageTicket: z.string().min(1),
-    comment: z.string().min(1),
-    markupImageUrl: z.string().optional(),
-    customerImageId: z.string().optional(),
-});
-
-const AddColorLibrarySchema = z.object({
-    imagesPath: z.array(z.string().min(1)).min(1),
-});
-
-const ListImagesSchema = z.object({
-    imageStatus: z.string().optional(),
-    excludeImageStatus: z.string().optional(),
-    productId: z.string().optional(),
-    fromDate: z.string().optional(),
-    toDate: z.string().optional(),
-    page: z.number().optional(),
-    imagesPerPage: z.number().max(100).optional(),
-    sortBy: z.enum(["id", "date", "status"]).optional(),
-    isDescending: z.enum(["true", "false"]).optional(),
-});
+// The servers' own schemas, not copies: a copy cannot fail when the server's schema drifts.
+// Imported dynamically, after PIXELZ_DOTENV_PATH is redirected, so the repo's real .env is never loaded.
+vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
+const { UploadImageSchema, RejectImageSchema, AddColorLibrarySchema, ListImagesSchema } = await import('../../../mcp-servers/platform/node/src/index.ts');
 
 describe('Platform Zod Schemas', () => {
     describe('UploadImageSchema', () => {
@@ -65,7 +22,7 @@ describe('Platform Zod Schemas', () => {
                 templateId: '456',
                 comment: 'Please crop tightly',
                 swatchColorCode: '#FF00AA',
-                markerX: 100.5,
+                markerX: 100,
             });
             expect(result.comment).toBe('Please crop tightly');
             expect(result.swatchColorCode).toBe('#FF00AA');
@@ -92,6 +49,12 @@ describe('Platform Zod Schemas', () => {
         it('rejects non-6-digit hex color', () => {
             expect(() => UploadImageSchema.parse({
                 imagePath: '/img.jpg', templateId: '123', swatchColorCode: '#FFF'
+            })).toThrow();
+        });
+
+        it('rejects a fractional marker: the API takes integer pixel coordinates', () => {
+            expect(() => UploadImageSchema.parse({
+                imagePath: '/img.jpg', templateId: '123', markerX: 100.5
             })).toThrow();
         });
 

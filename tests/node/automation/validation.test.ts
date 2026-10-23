@@ -1,39 +1,9 @@
-import { describe, it, expect } from 'vitest';
-import { z } from 'zod';
+import { describe, it, expect, vi } from 'vitest';
 
-// Re-define Automation schemas to test in isolation
-
-const CROP_LOCATIONS = ["eye_higher", "below_eye", "btw_eye_and_nose", "below_nose",
-    "between_nose_and_mouth", "below_mouth", "below_chin", "chest",
-    "at_elbow_higher", "at_elbow_lower", "waist", "below_buttock",
-    "main_body_axis", "mid_thigh", "above_knee", "at_knee", "below_knee"] as const;
-
-const RemoveBgSchema = z.object({
-    imagePath: z.string().min(1),
-    backgroundColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a hex color like #FFFFFF').optional(),
-    transparentBackground: z.boolean().optional(),
-    featherWidth: z.number().min(0).optional(),
-    trimapUrl: z.string().optional(),
-    callbackUrl: z.string().optional(),
-    sync: z.boolean().optional(),
-});
-
-const ModelCropSchema = z.object({
-    imagePath: z.string().min(1),
-    topCropLocation: z.enum(CROP_LOCATIONS).optional(),
-    bottomCropLocation: z.enum(CROP_LOCATIONS).optional(),
-    callbackUrl: z.string().optional(),
-    sync: z.boolean().optional(),
-});
-
-const ColorMatchingSchema = z.object({
-    imagePath: z.string().min(1),
-    colorMarkers: z.array(z.object({}).passthrough()).min(1),
-    callbackUrl: z.string().optional(),
-    sync: z.boolean().optional(),
-});
-
-const JobIdSchema = z.object({ jobId: z.string().min(1) });
+// The servers' own schemas, not copies: a copy cannot fail when the server's schema drifts.
+// Imported dynamically, after PIXELZ_DOTENV_PATH is redirected, so the repo's real .env is never loaded.
+vi.stubEnv('PIXELZ_DOTENV_PATH', '/dev/null');
+const { CROP_LOCATIONS, RemoveBgSchema, ModelCropSchema, ColorMatchingSchema, JobIdSchema } = await import('../../../mcp-servers/automation/node/src/index.ts');
 
 describe('Automation Zod Schemas', () => {
     describe('RemoveBgSchema', () => {

@@ -54,7 +54,8 @@ jobs:
   test-node:
     name: Test (Node.js)
     runs-on: ubuntu-latest
-    needs: [build-platform-mcp, build-automation-mcp]
+    # No `needs:` on the build jobs: the tests import the servers' src/ (not build/), so all three
+    # jobs run in parallel and the build jobs stay a pure compile check.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No `version:` here on purpose — the action errors out if pnpm is declared both
@@ -85,10 +86,6 @@ jobs:
         run: |
           cd mcp-servers/platform/node && pnpm install --frozen-lockfile
           cd ../../../mcp-servers/automation/node && pnpm install --frozen-lockfile
-      - name: Build MCP servers
-        run: |
-          cd mcp-servers/platform/node && pnpm run build
-          cd ../../../mcp-servers/automation/node && pnpm run build
       - name: Install test dependencies
         run: pnpm install --frozen-lockfile
         working-directory: tests/node
