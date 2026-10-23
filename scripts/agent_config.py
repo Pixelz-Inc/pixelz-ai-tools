@@ -150,14 +150,20 @@ def read_json(file, key):
 
 def write_text(file, text, eol):
     os.makedirs(os.path.dirname(file), exist_ok=True)
+    # Replace the link's TARGET: replacing the link itself would turn a dotfile-managed
+    # symlink into a plain file.
+    real = os.path.realpath(file) if os.path.exists(file) else file
     # Only the first write makes a backup, so reinstalling never overwrites the user's original.
     backup = f'{file}.pixelz-backup'
-    if os.path.exists(file) and not os.path.exists(backup):
-        shutil.copy2(file, backup)  # copy2 keeps the mode: these files may hold other servers' tokens
-    tmp = f'{file}.pixelz-tmp'
+    if os.path.exists(real) and not os.path.exists(backup):
+        shutil.copy2(real, backup)  # copy2 keeps the mode: these files may hold other servers' tokens
+    tmp = f'{real}.pixelz-tmp'
     with open(tmp, 'w', encoding='utf-8', newline='') as f:
         f.write(text.replace('\n', eol))
-    os.replace(tmp, file)
+    # The temp file gets default permissions; keep the config's own (it may be 0600 with tokens in it).
+    if os.path.exists(real):
+        shutil.copymode(real, tmp)
+    os.replace(tmp, real)
 
 
 def dump_json(data):
@@ -263,7 +269,7 @@ def _is_our_table(name):
 
 
 # A pixelz-* server written any other way (inline table, dotted key) - we do not edit those.
-OTHER_FORM = re.compile(r'''^\s*(?:mcp_servers\s*\.\s*)?["']?pixelz-(?:platform|automation)["']?\s*[.=]''', re.M)
+OTHER_FORM = re.compile(r'''^\s*(?:mcp_servers\s*\.\s*)?(?:(["'])pixelz-(?:platform|automation)\1|pixelz-(?:platform|automation))\s*[.=]''', re.M)
 
 
 def strip_toml_tables(text):
@@ -316,7 +322,7 @@ def unmerge_toml(file):
     text, eol = cfg
     kept = strip_toml_tables(text)
     if OTHER_FORM.search(kept):
-        remove_by_hand(file)
+        print(f'WARNING: {file} also defines pixelz-platform/pixelz-automation in a form this uninstaller does not edit. Remove those entries by hand.')
     if kept == re.sub(r'\n+$', '', text):
         return
     if not kept.strip():
@@ -509,7 +515,10 @@ def in_use(opts):
     if not opts.get('target'):
         fail('--target is required')
     names = skill_names(opts.get('src'))
-    marker = slash(opts['target']).rstrip('/') + '/.pixelz/'
+    # Windows paths are case-insensitive, and the user may type the target differently than at install.
+    def fold(s):
+        return s.lower() if PLATFORM == 'win32' else s
+    marker = fold(slash(os.path.abspath(opts['target'])).rstrip('/') + '/.pixelz/')
     for agent_id, a in AGENTS.items():
         if agent_id == opts.get('exclude'):
             continue
@@ -522,7 +531,7 @@ def in_use(opts):
             file = expand(spec['file'], o)
             if file and os.path.exists(file):
                 with open(file, 'rb') as f:
-                    used = marker.encode('utf-8') in f.read()
+                    used = marker in fold(f.read().decode('utf-8', 'replace'))
         if used:
             print(agent_id)
 

@@ -87,7 +87,7 @@ async function request(method: string, url: string, { params, body, headers = {}
         try { data = text ? JSON.parse(text) : ''; } catch { isJson = false; }
         if (res.ok) {
             // A 2xx that is not JSON is a proxy or login page, not an API answer (Python fails too).
-            if (!isJson) throw new Error(`[API_ERROR] Expected a JSON response (HTTP ${res.status}), got: ${text.slice(0, 100)}`);
+            if (!isJson) throw new Error(`[API_ERROR] Expected a JSON response (HTTP ${res.status}), got: ${redactSecrets(text).slice(0, 100)}`);
             return { status: res.status, data };
         }
         if (retryable && RETRY_STATUS.has(res.status)) {

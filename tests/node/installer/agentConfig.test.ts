@@ -303,6 +303,15 @@ for (const h of helpers) {
                 expect(fs.readFileSync(file(), 'utf8')).toBe(original);
             }, 30_000);
 
+            it('does not mistake a string that starts with a pixelz name for a server', async () => {
+                write('[profiles.x]\nflags = [\n  "pixelz-automation=on",\n]\n');
+                const r = await run(h, ['register-mcp', '--agent', 'codex', '--scope', 'global', ...MCP]);
+                expect(r.stdout).not.toContain('WARNING');
+                const text = fs.readFileSync(file(), 'utf8');
+                expect(text).toContain('"pixelz-automation=on"');
+                expect(text).toContain('[mcp_servers.pixelz-platform]');
+            }, 30_000);
+
             it("keeps the comments above the user's next table", async () => {
                 await run(h, ['register-mcp', '--agent', 'codex', '--scope', 'global', ...MCP]);
                 fs.appendFileSync(file(), '\n# my github server\n[mcp_servers.github]\ncommand = "gh"\n');
@@ -332,6 +341,36 @@ for (const h of helpers) {
             const none = await run(h, ['in-use', '--target', target, '--src', SKILLS_SRC, '--exclude', 'claude']);
             expect(none.stdout.trim()).toBe('');
         }, 60_000);
+
+        it('in-use: matches the target case-insensitively on Windows', async () => {
+            // Installed as one spelling, uninstalled as another: a miss here deleted .pixelz/.
+            await run(h, ['register-mcp', '--agent', 'windsurf', '--scope', 'local', '--target', target, ...MCP,
+                '--dotenv', path.join(target, '.pixelz', '.env')], 'win32');
+            const r = await run(h, ['in-use', '--target', target.toUpperCase(), '--src', SKILLS_SRC], 'win32');
+            expect(r.stdout.trim()).toBe('windsurf');
+        }, 30_000);
+
+        // POSIX-only: Windows needs privileges for symlinks and has no 0600 mode bits.
+        it.skipIf(process.platform === 'win32')('writes through a symlinked config instead of replacing the link', async () => {
+            const real = path.join(home, 'dotfiles', 'mcp.json');
+            fs.mkdirSync(path.dirname(real), { recursive: true });
+            fs.writeFileSync(real, '{"theme": "mine"}\n');
+            const link = path.join(home, '.cursor', 'mcp.json');
+            fs.mkdirSync(path.dirname(link), { recursive: true });
+            fs.symlinkSync(real, link);
+            await run(h, ['register-mcp', '--agent', 'cursor', '--scope', 'global', ...MCP]);
+            expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+            expect(fs.readFileSync(real, 'utf8')).toContain('pixelz-platform');
+        }, 30_000);
+
+        it.skipIf(process.platform === 'win32')("keeps a private config's permissions", async () => {
+            const file = path.join(home, '.cursor', 'mcp.json');
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            fs.writeFileSync(file, '{"mcpServers": {"other": {"command": "x", "env": {"TOKEN": "s3cret"}}}}\n');
+            fs.chmodSync(file, 0o600);
+            await run(h, ['register-mcp', '--agent', 'cursor', '--scope', 'global', ...MCP]);
+            expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+        }, 30_000);
 
         it('remove-skills says when the folder is shared with other agents', async () => {
             await run(h, ['install-skills', '--agent', 'universal', '--scope', 'global', '--src', SKILLS_SRC, '--cli-root', '/x', '--runtime', 'node']);

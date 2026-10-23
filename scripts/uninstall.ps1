@@ -36,7 +36,10 @@ $agent = $ids[$parsed - 1]
 
 $localInstall = $false
 $scopeArgs = @("--scope", "global")
-$scopePref = Read-Host "Uninstall from (global/local)"
+$scopePref = (Read-Host "Uninstall from (global/local)").Trim().ToLower()
+if ($scopePref -ne "local" -and $scopePref -ne "global") {
+    Write-Host "Please answer global or local." -ForegroundColor Red; Pop-Location; exit 1
+}
 if ($scopePref -eq "local") {
     $localInstall = $true
     $targetPath = Read-Host "Enter local target directory path"
@@ -45,6 +48,8 @@ if ($scopePref -eq "local") {
     }
     # Same forgiving input as install.ps1: quotes, trailing slash, relative to where we ran.
     $targetPath = $targetPath.Trim().Trim('"').Trim("'").TrimEnd('\', '/')
+    # `C:\` trimmed to `C:` means "current directory on C:", i.e. this repo - restore the root.
+    if ($targetPath -match '^[A-Za-z]:$') { $targetPath += '\' }
     if (-not [IO.Path]::IsPathRooted($targetPath) -and -not $targetPath.StartsWith('~')) { $targetPath = Join-Path $OrigDir $targetPath }
     $targetPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($targetPath)
     if (!(Test-Path $targetPath)) {

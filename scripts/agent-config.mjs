@@ -107,12 +107,17 @@ function readJson(file, key) {
 
 function writeText(file, text, eol) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    // Rename onto the link's TARGET: renaming onto the link itself would replace a
+    // dotfile-managed symlink with a plain file.
+    const real = fs.existsSync(file) ? fs.realpathSync(file) : file;
     // Only the first write makes a backup, so reinstalling never overwrites the user's original.
     const backup = `${file}.pixelz-backup`;
-    if (fs.existsSync(file) && !fs.existsSync(backup)) fs.copyFileSync(file, backup);
-    const tmp = `${file}.pixelz-tmp`;
+    if (fs.existsSync(real) && !fs.existsSync(backup)) fs.copyFileSync(real, backup);
+    const tmp = `${real}.pixelz-tmp`;
     fs.writeFileSync(tmp, text.replace(/\n/g, eol), 'utf8');
-    fs.renameSync(tmp, file);
+    // The temp file gets default permissions; keep the config's own (it may be 0600 with tokens in it).
+    if (fs.existsSync(real)) fs.chmodSync(tmp, fs.statSync(real).mode);
+    fs.renameSync(tmp, real);
 }
 
 function entryFor(format, cmd, script, dotenv) {
@@ -192,7 +197,7 @@ function tomlBlock(entries) {
 
 const isOurTable = name => SERVERS.some(s => name === `mcp_servers.${s}` || name.startsWith(`mcp_servers.${s}.`));
 // A pixelz-* server written any other way (inline table, dotted key) - we do not edit those.
-const OTHER_FORM = /^\s*(?:mcp_servers\s*\.\s*)?["']?pixelz-(?:platform|automation)["']?\s*[.=]/m;
+const OTHER_FORM = /^\s*(?:mcp_servers\s*\.\s*)?(?:(["'])pixelz-(?:platform|automation)\1|pixelz-(?:platform|automation))\s*[.=]/m;
 
 /** Drop our [mcp_servers.pixelz-*] tables and all their sub-tables; keep everything else verbatim. */
 function stripTomlTables(text) {
@@ -230,7 +235,9 @@ function unmergeToml(file) {
     const cfg = readConfig(file);
     if (!cfg) return removeByHand(file);
     const kept = stripTomlTables(cfg.text);
-    if (OTHER_FORM.test(kept)) removeByHand(file);
+    if (OTHER_FORM.test(kept)) {
+        console.log(`WARNING: ${file} also defines pixelz-platform/pixelz-automation in a form this uninstaller does not edit. Remove those entries by hand.`);
+    }
     if (kept === cfg.text.replace(/\n+$/, '')) return;
     if (!kept.trim()) {
         fs.rmSync(file);
@@ -410,7 +417,9 @@ function removeSkills(opts) {
 function inUse(opts) {
     if (!opts.target) fail('--target is required');
     const names = skillNames(opts.src);
-    const marker = `${slash(opts.target).replace(/\/+$/, '')}/.pixelz/`;
+    // Windows paths are case-insensitive, and the user may type the target differently than at install.
+    const fold = s => (PLATFORM === 'win32' ? s.toLowerCase() : s);
+    const marker = fold(`${slash(path.resolve(opts.target)).replace(/\/+$/, '')}/.pixelz/`);
     for (const [id, a] of Object.entries(AGENTS)) {
         if (id === opts.exclude) continue;
         const o = { ...opts, agent: id, scope: 'local' };
@@ -419,7 +428,7 @@ function inUse(opts) {
         for (const spec of [a.mcp?.local, a.mcp?.global]) {
             if (used || !spec?.file) continue;
             const file = expand(spec.file, o);
-            used = !!file && fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes(marker);
+            used = !!file && fs.existsSync(file) && fold(fs.readFileSync(file, 'utf8')).includes(marker);
         }
         if (used) console.log(id);
     }

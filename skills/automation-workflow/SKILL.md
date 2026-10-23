@@ -15,7 +15,8 @@ Run the appropriate command for the task. Each returns a `job_id` immediately. A
 
 ```bash
 # Background removal
-node cli-tools/automation/node/cli.js remove-bg "<PATH_OR_URL>" [--transparent true] [--color <HEX>]
+# (transparent PNG by default; add --color <HEX> for a solid background instead - not both)
+node cli-tools/automation/node/cli.js remove-bg "<PATH_OR_URL>" [--color <HEX>]
 
 # Color matching
 node cli-tools/automation/node/cli.js color-match "<PATH_OR_URL>" '<MARKERS_JSON>'
