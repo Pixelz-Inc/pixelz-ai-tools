@@ -9,12 +9,14 @@ Standard library only: this runs before any `pip install`.
 import json
 import math
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agents.json'), encoding='utf-8') as _f:
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(SCRIPT_DIR, 'agents.json'), encoding='utf-8') as _f:
     AGENTS = json.load(_f)['agents']
 SERVERS = ['pixelz-platform', 'pixelz-automation']
 # Tests set these to exercise Windows paths on any OS, and to keep the real `claude` CLI
@@ -50,6 +52,12 @@ def slash(p):
     # Forward slashes everywhere we write: node and python accept them on Windows, and they
     # need no escaping in JSON, TOML or a shell command line.
     return p.replace('\\', '/')
+
+
+def shell_word(s):
+    # A command goes into SKILL.md and a manual shell line: a venv path under "C:/Users/Jane Doe"
+    # must be quoted there, while a bare `node` / `python3` must stay as it is.
+    return s if re.fullmatch(r'[\w.+-]+', s) else f'"{s}"'
 
 
 def expand(spec, opts):
@@ -382,7 +390,7 @@ def register_mcp(opts):
 
     if spec.get('cli') == 'claude':
         env_flag = f' -e PIXELZ_DOTENV_PATH="{slash(dotenv)}"' if dotenv else ''
-        manual = [f"claude mcp add --scope user{env_flag} --transport stdio {name} -- {opts['cmd']} \"{slash(script)}\""
+        manual = [f"claude mcp add --scope user{env_flag} --transport stdio {name} -- {shell_word(opts['cmd'])} \"{slash(script)}\""
                   for name, script in scripts.items()]
         if not on_path(CLAUDE):
             return print_claude_commands('the `claude` CLI was not found on PATH', manual)
@@ -456,8 +464,9 @@ def install_skills(opts):
         if not opts.get(k):
             fail(f'--{k} is required')
     dest = skills_dir(agent, opts)
-    runtime = opts['runtime']
-    lang, ext = ('node', 'js') if runtime == 'node' else ('python', 'py')
+    runtime = slash(opts['runtime'])
+    # The runtime may be an absolute venv interpreter, so judge it by its file name.
+    lang, ext = ('node', 'js') if re.fullmatch(r'node(\.exe)?', posixpath.basename(runtime), re.I) else ('python', 'py')
     cli_root = slash(opts['cli-root'])
     names = skill_names(opts['src'])
     for name in names:
@@ -469,8 +478,8 @@ def install_skills(opts):
             # Skills run in the agent's working directory (the user's project), so the relative
             # `cli-tools/...` invocation in the source SKILL.md must become an absolute, quoted path.
             text = read_text(skill_md)
-            text = text.replace('node cli-tools/automation/node/cli.js', f'{runtime} "{cli_root}/automation/{lang}/cli.{ext}"')
-            text = text.replace('node cli-tools/platform/node/cli.js', f'{runtime} "{cli_root}/platform/{lang}/cli.{ext}"')
+            text = text.replace('node cli-tools/automation/node/cli.js', f'{shell_word(runtime)} "{cli_root}/automation/{lang}/cli.{ext}"')
+            text = text.replace('node cli-tools/platform/node/cli.js', f'{shell_word(runtime)} "{cli_root}/platform/{lang}/cli.{ext}"')
             with open(skill_md, 'w', encoding='utf-8', newline='') as f:
                 f.write(text)
     print(f'{len(names)} skills deployed to: {dest}')
@@ -536,6 +545,38 @@ def in_use(opts):
             print(agent_id)
 
 
+# ---------- Version ----------
+
+def repo_version():
+    pkg = os.path.join(SCRIPT_DIR, '..', 'package.json')
+    version = None
+    try:
+        with open(pkg, encoding='utf-8') as f:
+            version = json.load(f).get('version')
+    except (OSError, ValueError, AttributeError):
+        pass  # reported below
+    if not isinstance(version, str) or not version:
+        fail(f'could not read the version from {pkg}')
+    return version
+
+
+def stamp_version(opts):
+    """Record the installed version in <target>/.pixelz/VERSION, announcing an update over a different one."""
+    if not opts.get('target'):
+        fail('--target is required')
+    version = repo_version()
+    path = os.path.join(opts['target'], '.pixelz', 'VERSION')
+    previous = ''
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as f:
+            previous = f.read().strip()
+    if previous and previous != version:
+        print(f"Updating Pixelz tools in {slash(opts['target'])} from {previous} to {version}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(version + '\n')
+
+
 def list_agents(opts):
     for agent_id, a in AGENTS.items():
         if opts.get('track') == 'mcp' and not a.get('mcp'):
@@ -553,6 +594,7 @@ def main():
         'list': list_agents, 'skills-dir': lambda o: print(skills_dir(agent_of(o), o)),
         'install-skills': install_skills, 'remove-skills': remove_skills,
         'register-mcp': register_mcp, 'unregister-mcp': unregister_mcp, 'in-use': in_use,
+        'version': lambda o: print(repo_version()), 'stamp-version': stamp_version,
     }
     if action not in actions:
         fail(f"unknown action '{action}' (expected: {', '.join(actions)})")

@@ -6,7 +6,60 @@ ORIG_PWD="$PWD"
 # Determine project root based on script location
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || exit 1
+
+usage() {
+    cat <<'EOF'
+Usage: uninstall.sh [--agent ID] [--scope global|local] [--target PATH] [--help]
+
+Any value given as a flag skips its prompt; anything missing is asked for interactively.
+Without a terminal (CI, scripts, AI agents) every value must be given as a flag.
+
+  --agent   an id from scripts/agents.json: claude, codex, copilot, cursor, antigravity,
+            windsurf, opencode, universal
+  --scope   global (your user account) | local (one project folder)
+  --target  project folder for --scope local; implies --scope local when --scope is omitted
+
+Example: ./scripts/uninstall.sh --agent claude --scope global
+EOF
+}
+
+die_usage() {
+    echo "Error: $1" >&2
+    echo "Run with --help for the list of flags." >&2
+    exit 1
+}
+
+AGENT=""; SCOPE_PREF=""; TARGET_PATH=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --agent|--scope|--target)
+            [ $# -ge 2 ] || die_usage "$1 needs a value"
+            case "$1" in
+                --agent) AGENT="$2" ;;
+                --scope) SCOPE_PREF="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ;;
+                --target) TARGET_PATH="$2" ;;
+            esac
+            shift 2 ;;
+        *) die_usage "unknown option '$1'" ;;
+    esac
+done
+case "$SCOPE_PREF" in ""|global|local) ;; *) die_usage "--scope must be global or local (got '$SCOPE_PREF')" ;; esac
+[ -z "$SCOPE_PREF" ] && [ -n "$TARGET_PATH" ] && SCOPE_PREF="local"
+[ "$SCOPE_PREF" == "global" ] && [ -n "$TARGET_PATH" ] && die_usage "--target only applies to --scope local"
+
+# Never sit waiting on a prompt nobody can answer.
+MISSING=()
+[ -z "$AGENT" ] && MISSING+=(--agent)
+[ -z "$SCOPE_PREF" ] && MISSING+=(--scope)
+[ "$SCOPE_PREF" == "local" ] && [ -z "$TARGET_PATH" ] && MISSING+=(--target)
+if [ ${#MISSING[@]} -gt 0 ] && [ ! -t 0 ]; then
+    echo "Error: no terminal to prompt on, so these must be given as flags: ${MISSING[*]}" >&2
+    echo "" >&2
+    usage >&2
+    exit 1
+fi
 
 echo "Pixelz AI Tools Uninstaller"
 echo "========================="
@@ -25,20 +78,29 @@ fi
 AGENT_IDS=(); i=0
 while IFS=$'\t' read -r id label; do
     i=$((i + 1)); AGENT_IDS+=("$id")
-    echo "  $i) ${label%$'\r'}"
+    [ -n "$AGENT" ] || echo "  $i) ${label%$'\r'}"
 done < <("${HELPER[@]}" list)
-read -p "Select AI Agent to uninstall for (1-$i): " AGENT_CHOICE
-if ! [[ "$AGENT_CHOICE" =~ ^[0-9]+$ ]] || [ "$AGENT_CHOICE" -lt 1 ] || [ "$AGENT_CHOICE" -gt $i ]; then
-    echo "Invalid agent"; exit 1
+if [ -z "$AGENT" ]; then
+    read -p "Select AI Agent to uninstall for (1-$i): " AGENT_CHOICE
+    if ! [[ "$AGENT_CHOICE" =~ ^[0-9]+$ ]] || [ "$AGENT_CHOICE" -lt 1 ] || [ "$AGENT_CHOICE" -gt $i ]; then
+        echo "Invalid agent"; exit 1
+    fi
+    AGENT="${AGENT_IDS[$((AGENT_CHOICE - 1))]}"
+else
+    FOUND=false
+    for id in "${AGENT_IDS[@]}"; do [ "$id" == "$AGENT" ] && FOUND=true; done
+    $FOUND || { echo "Error: unknown agent '$AGENT'. Agents: ${AGENT_IDS[*]}" >&2; exit 1; }
 fi
-AGENT="${AGENT_IDS[$((AGENT_CHOICE - 1))]}"
 
-read -p "Uninstall from (global/local): " SCOPE_PREF
+if [ -z "$SCOPE_PREF" ]; then
+    read -p "Uninstall from (global/local): " SCOPE_PREF
+    SCOPE_PREF="$(printf '%s' "$SCOPE_PREF" | tr '[:upper:]' '[:lower:]')"
+fi
 LOCAL_INSTALL=false
 SCOPE_ARGS=(--scope global)
-if [ "$(printf '%s' "$SCOPE_PREF" | tr '[:upper:]' '[:lower:]')" == "local" ]; then
+if [ "$SCOPE_PREF" == "local" ]; then
     LOCAL_INSTALL=true
-    read -p "Enter local target directory path: " TARGET_PATH
+    [ -n "$TARGET_PATH" ] || read -p "Enter local target directory path: " TARGET_PATH
     if [ -z "$TARGET_PATH" ]; then
         echo "Error: No path provided."; exit 1
     fi
@@ -51,7 +113,7 @@ if [ "$(printf '%s' "$SCOPE_PREF" | tr '[:upper:]' '[:lower:]')" == "local" ]; t
     fi
     TARGET_PATH="$(cd "$TARGET_PATH" && pwd)"
     SCOPE_ARGS=(--scope local --target "$TARGET_PATH")
-elif [ "$(printf '%s' "$SCOPE_PREF" | tr '[:upper:]' '[:lower:]')" != "global" ]; then
+elif [ "$SCOPE_PREF" != "global" ]; then
     echo "Please answer global or local."; exit 1
 fi
 
@@ -62,17 +124,22 @@ HELPER_OK=true
 "${HELPER[@]}" remove-skills --agent "$AGENT" "${SCOPE_ARGS[@]}" --src "$PROJECT_ROOT/skills" || HELPER_OK=false
 
 if $LOCAL_INSTALL && [ -d "$TARGET_PATH/.pixelz" ]; then
-    # .pixelz/ holds the project's .env and CLI tools for EVERY agent installed here, so it goes
-    # only when nothing else still uses it - and never after a failed step above.
+    # .pixelz/ holds the project's .env, CLI tools and Python venv for EVERY agent installed here,
+    # so it goes only when nothing else still uses it - and never after a failed step above.
     STILL_USING="$("${HELPER[@]}" in-use --target "$TARGET_PATH" --src "$PROJECT_ROOT/skills" --exclude "$AGENT")" || HELPER_OK=false
     if ! $HELPER_OK; then
         echo "Kept $TARGET_PATH/.pixelz because a step above failed."
     elif [ -n "$STILL_USING" ]; then
         echo "Kept $TARGET_PATH/.pixelz: still used by $(echo $STILL_USING | tr -d '\r')."
     else
-        echo "Removing $TARGET_PATH/.pixelz (CLI tools and its .env)..."
+        echo "Removing $TARGET_PATH/.pixelz (CLI tools, its .env and Python environment)..."
         rm -rf "$TARGET_PATH/.pixelz"
     fi
+fi
+
+if ! $LOCAL_INSTALL && [ -d "$PROJECT_ROOT/.venv" ]; then
+    # It may be the developer's own environment for this checkout, so it is never deleted here.
+    echo "NOTE: the Python virtual environment $PROJECT_ROOT/.venv was kept. Delete it yourself if you no longer use the Python track."
 fi
 
 if $LOCAL_INSTALL; then

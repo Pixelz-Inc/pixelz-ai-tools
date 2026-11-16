@@ -11,7 +11,8 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const AGENTS = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'agents.json'), 'utf8')).agents;
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const AGENTS = JSON.parse(fs.readFileSync(path.join(SCRIPT_DIR, 'agents.json'), 'utf8')).agents;
 const SERVERS = ['pixelz-platform', 'pixelz-automation'];
 // Tests set these to exercise Windows paths on any OS, and to keep the real `claude` CLI
 // (and the user's real Claude config) out of reach.
@@ -37,6 +38,10 @@ function parseArgs(argv) {
 // Forward slashes everywhere we write: node and python accept them on Windows, and they need
 // no escaping in JSON, TOML or a shell command line.
 const slash = p => p.replace(/\\/g, '/');
+
+// A command goes into SKILL.md and a manual shell line: a venv path under "C:/Users/Jane Doe" must be
+// quoted there, while a bare `node` / `python3` must stay as it is.
+const shellWord = s => (/^[\w.+-]+$/.test(s) ? s : `"${s}"`);
 
 function expand(spec, opts) {
     if (spec == null) return null;
@@ -294,7 +299,7 @@ function registerMcp(opts) {
     if (spec.cli === 'claude') {
         const manual = Object.entries(scripts).map(([name, script]) => {
             const env = opts.dotenv ? ` -e PIXELZ_DOTENV_PATH="${slash(opts.dotenv)}"` : '';
-            return `claude mcp add --scope user${env} --transport stdio ${name} -- ${opts.cmd} "${slash(script)}"`;
+            return `claude mcp add --scope user${env} --transport stdio ${name} -- ${shellWord(opts.cmd)} "${slash(script)}"`;
         });
         if (!onPath(CLAUDE)) return printClaudeCommands('the `claude` CLI was not found on PATH', manual);
         if (cmdUnsafe([opts.cmd, opts.platform, opts.automation, opts.dotenv ?? ''])) {
@@ -360,14 +365,16 @@ function installSkills(opts) {
     const agent = agentOf(opts);
     for (const k of ['src', 'cli-root', 'runtime']) if (!opts[k]) fail(`--${k} is required`);
     const dest = skillsDir(agent, opts);
-    const lang = opts.runtime === 'node' ? 'node' : 'python';
+    const runtime = slash(opts.runtime);
+    // The runtime may be an absolute venv interpreter, so judge it by its file name.
+    const lang = /^node(\.exe)?$/i.test(path.posix.basename(runtime)) ? 'node' : 'python';
     const ext = lang === 'node' ? 'js' : 'py';
     const cliRoot = slash(opts['cli-root']);
     // Skills run in the agent's working directory (the user's project), so the relative
     // `cli-tools/...` invocation in the source SKILL.md must become an absolute, quoted path.
     const rewrite = text => text
-        .replaceAll('node cli-tools/automation/node/cli.js', `${opts.runtime} "${cliRoot}/automation/${lang}/cli.${ext}"`)
-        .replaceAll('node cli-tools/platform/node/cli.js', `${opts.runtime} "${cliRoot}/platform/${lang}/cli.${ext}"`);
+        .replaceAll('node cli-tools/automation/node/cli.js', `${shellWord(runtime)} "${cliRoot}/automation/${lang}/cli.${ext}"`)
+        .replaceAll('node cli-tools/platform/node/cli.js', `${shellWord(runtime)} "${cliRoot}/platform/${lang}/cli.${ext}"`);
     const names = skillNames(opts.src);
     for (const name of names) {
         const to = path.join(dest, name);
@@ -434,6 +441,29 @@ function inUse(opts) {
     }
 }
 
+// ---------- Version ----------
+
+function repoVersion() {
+    const pkg = path.join(SCRIPT_DIR, '..', 'package.json');
+    let version;
+    try { version = JSON.parse(fs.readFileSync(pkg, 'utf8')).version; } catch { /* reported below */ }
+    if (typeof version !== 'string' || !version) fail(`could not read the version from ${pkg}`);
+    return version;
+}
+
+/** Record the installed version in <target>/.pixelz/VERSION, announcing an update over a different one. */
+function stampVersion(opts) {
+    if (!opts.target) fail('--target is required');
+    const version = repoVersion();
+    const file = path.join(opts.target, '.pixelz', 'VERSION');
+    const previous = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : '';
+    if (previous && previous !== version) {
+        console.log(`Updating Pixelz tools in ${slash(opts.target)} from ${previous} to ${version}`);
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${version}\n`, 'utf8');
+}
+
 function list(opts) {
     for (const [id, a] of Object.entries(AGENTS)) {
         if (opts.track === 'mcp' && !a.mcp) continue;
@@ -448,6 +478,7 @@ const actions = {
     list, 'skills-dir': o => console.log(skillsDir(agentOf(o), o)),
     'install-skills': installSkills, 'remove-skills': removeSkills,
     'register-mcp': registerMcp, 'unregister-mcp': unregisterMcp, 'in-use': inUse,
+    version: () => console.log(repoVersion()), 'stamp-version': stampVersion,
 };
 if (!actions[action]) fail(`unknown action '${action}' (expected: ${Object.keys(actions).join(', ')})`);
 actions[action](opts);

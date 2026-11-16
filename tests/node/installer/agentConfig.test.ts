@@ -16,6 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const SKILLS_SRC = path.join(REPO_ROOT, 'skills');
 const AGENTS: Record<string, any> = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'scripts/agents.json'), 'utf8')).agents;
+const PACKAGE_VERSION: string = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version;
 const SKILL_COUNT = fs.readdirSync(SKILLS_SRC, { withFileTypes: true }).filter(d => d.isDirectory()).length;
 
 const helpers = [
@@ -108,6 +109,32 @@ describe('agent helper — Node and Python twins agree', () => {
             }, 60_000);
         }
     }
+
+    it('version and stamp-version behave identically', async () => {
+        const out: string[] = [];
+        for (const h of helpers) {
+            fs.rmSync(target, { recursive: true, force: true });
+            fs.mkdirSync(path.join(target, '.pixelz'), { recursive: true });
+            fs.writeFileSync(path.join(target, '.pixelz', 'VERSION'), '0.0.1\n');
+            const v = await run(h, ['version']);
+            const s = await run(h, ['stamp-version', '--target', target]);
+            out.push(JSON.stringify([v.code, v.stdout.replace(/\r/g, ''), s.code, s.stdout.replace(/\r/g, ''), snapshot(target)]));
+        }
+        expect(out[1]).toBe(out[0]);
+    }, 60_000);
+
+    it('install-skills with a spaced venv runtime deploys byte-identical skills', async () => {
+        const snaps: Record<string, string>[] = [];
+        for (const h of helpers) {
+            fs.rmSync(home, { recursive: true, force: true });
+            fs.mkdirSync(home, { recursive: true });
+            await run(h, ['install-skills', '--agent', 'claude', '--scope', 'global', '--src', SKILLS_SRC,
+                '--cli-root', '/opt/pixelz/cli-tools', '--runtime', 'C:\\Users\\Jane Doe\\.venv\\Scripts\\python.exe']);
+            snaps.push(snapshot(home));
+        }
+        expect(Object.keys(snaps[0]).length).toBeGreaterThan(0);
+        expect(snaps[1]).toEqual(snaps[0]);
+    }, 60_000);
 
     it('install-skills deploys byte-identical skills', async () => {
         const snaps: Record<string, string>[] = [];
@@ -376,6 +403,70 @@ for (const h of helpers) {
             await run(h, ['install-skills', '--agent', 'universal', '--scope', 'global', '--src', SKILLS_SRC, '--cli-root', '/x', '--runtime', 'node']);
             const r = await run(h, ['remove-skills', '--agent', 'universal', '--scope', 'global', '--src', SKILLS_SRC]);
             expect(r.stdout).toContain('is shared with OpenAI Codex');
+        }, 30_000);
+
+        // ---- venv interpreter as the runtime ----
+
+        it('install-skills: quotes a venv interpreter path that contains spaces, and keeps the python layout', async () => {
+            const dir = resolve(AGENTS.claude.skills.global, 'linux')!;
+            for (const runtime of ['/opt/my pixelz/venv/bin/python', 'C:\\Users\\Jane Doe\\venv\\Scripts\\python.exe']) {
+                const r = await run(h, ['install-skills', '--agent', 'claude', '--scope', 'global', '--src', SKILLS_SRC,
+                    '--cli-root', '/opt/pixelz/cli-tools', '--runtime', runtime]);
+                expect(r.code, r.stderr).toBe(0);
+                const md = fs.readFileSync(path.join(dir, 'platform-upload-image', 'SKILL.md'), 'utf8');
+                expect(md).toContain(`"${fwd(runtime)}" "/opt/pixelz/cli-tools/platform/python/cli.py" upload`);
+                expect(md).not.toMatch(/node cli-tools\//);
+            }
+        }, 30_000);
+
+        it('install-skills: an absolute path to node still selects the Node CLI', async () => {
+            const dir = resolve(AGENTS.claude.skills.global, 'linux')!;
+            await run(h, ['install-skills', '--agent', 'claude', '--scope', 'global', '--src', SKILLS_SRC,
+                '--cli-root', '/opt/pixelz/cli-tools', '--runtime', '/usr/local/bin/node']);
+            const md = fs.readFileSync(path.join(dir, 'platform-upload-image', 'SKILL.md'), 'utf8');
+            expect(md).toContain('"/usr/local/bin/node" "/opt/pixelz/cli-tools/platform/node/cli.js" upload');
+        }, 30_000);
+
+        it('claude global without the CLI: quotes a command that contains spaces in the printed commands', async () => {
+            const r = await run(h, ['register-mcp', '--agent', 'claude', '--scope', 'global', ...MCP.map(a => (a === 'node' ? '/opt/my pixelz/venv/bin/python' : a))]);
+            expect(r.stdout).toContain('-- "/opt/my pixelz/venv/bin/python" "/opt/pixelz/platform.js"');
+        }, 30_000);
+
+        it('register-mcp: writes a venv interpreter as the server command', async () => {
+            const python = 'C:/Users/Jane Doe/.venv/Scripts/python.exe';
+            await run(h, ['register-mcp', '--agent', 'cursor', '--scope', 'global', ...MCP.map(a => (a === 'node' ? python : a))]);
+            const cfg = JSON.parse(fs.readFileSync(path.join(home, '.cursor', 'mcp.json'), 'utf8'));
+            expect(cfg.mcpServers['pixelz-platform']).toMatchObject({ command: python, args: ['/opt/pixelz/platform.js'] });
+        }, 30_000);
+
+        // ---- version stamp ----
+
+        it('version: prints the version field of the repo-root package.json', async () => {
+            const r = await run(h, ['version']);
+            expect(r.code, r.stderr).toBe(0);
+            expect(r.stdout.trim()).toBe(PACKAGE_VERSION);
+        }, 30_000);
+
+        it('stamp-version: writes .pixelz/VERSION (no BOM) and announces only a real change', async () => {
+            const file = path.join(target, '.pixelz', 'VERSION');
+            const first = await run(h, ['stamp-version', '--target', target]);
+            expect(first.code, first.stderr).toBe(0);
+            expect(first.stdout).not.toContain('Updating');
+            expect(fs.readFileSync(file).equals(Buffer.from(`${PACKAGE_VERSION}\n`))).toBe(true);
+
+            const same = await run(h, ['stamp-version', '--target', target]);
+            expect(same.stdout).not.toContain('Updating');
+
+            fs.writeFileSync(file, '0.0.1\n');
+            const updated = await run(h, ['stamp-version', '--target', target]);
+            expect(updated.stdout.trim()).toBe(`Updating Pixelz tools in ${fwd(target)} from 0.0.1 to ${PACKAGE_VERSION}`);
+            expect(fs.readFileSync(file, 'utf8').trim()).toBe(PACKAGE_VERSION);
+        }, 30_000);
+
+        it('stamp-version: needs --target', async () => {
+            const r = await run(h, ['stamp-version']);
+            expect(r.code).toBe(1);
+            expect(r.stderr).toContain('--target is required');
         }, 30_000);
 
         it('rejects an unknown agent', async () => {
