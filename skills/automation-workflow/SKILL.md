@@ -13,6 +13,8 @@ All Pixelz Automation operations (background removal, color matching, masking, t
 
 Run the appropriate command for the task. Each returns a `job_id` immediately. After submitting, tell the user their `job_id` and let them know they can ask you to check the status at any time.
 
+Each Automation job is billed, so do not resubmit a job just to "check" it. Use the status command in Step 2.
+
 ```bash
 # Background removal
 # (transparent PNG by default; add --color <HEX> for a solid background instead - not both)
@@ -71,4 +73,8 @@ Add `--sync` to any submit command to get the result immediately without polling
 
 ## Using Webhooks (Optional)
 Pass `--callback <URL>` to any submit command to receive an HTTP POST notification when the job finishes, instead of polling. Verify the webhook signature using `automation-get-webhook-public-key`.
+
+## Troubleshooting
+- Local files must be JPG, JPEG, PNG or WEBP. Any other extension returns `[VALIDATION_ERROR]`. A public URL is not checked locally.
+- If `[UPLOAD_UNAVAILABLE]` occurs, the account is not enabled for direct file uploads (it is off by default on the Automation API). Ask the user for a publicly accessible image URL instead. Do not retry with a local path.
 ---

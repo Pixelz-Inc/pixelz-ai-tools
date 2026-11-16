@@ -36,4 +36,6 @@ node cli-tools/platform/node/cli.js upload "<PATH_OR_URL>" --template <ID> [--im
 - If `--template` is unknown, run `platform-list-templates` first.
 - If an `[AUTH_ERROR]` occurs, the user needs to set `PIXELZ_PLATFORM_API_KEY` and `PIXELZ_PLATFORM_EMAIL` in their `.env` file.
 - If a `[PRESIGN_UNAVAILABLE]` error occurs, the account is not enabled for direct file uploads. Ask the user to provide a publicly accessible image URL (e.g. from S3, Google Cloud Storage, or any CDN) instead of a local file path. Do not retry with a local path.
+- Local files must be image files. The CLI rejects non-image extensions with `[VALIDATION_ERROR]`.
+- Submitting creates a billable retouching order. Confirm with the user before submitting unless they have clearly asked for it.
 ---

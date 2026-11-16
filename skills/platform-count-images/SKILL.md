@@ -20,10 +20,7 @@ node cli-tools/platform/node/cli.js count-images [--status <CODE|NAME>] [--fromD
 - `--toDate`: (Optional) Only count images created on or before this date (`YYYY-MM-DD`).
 
 ## Status Code Reference
-- **10** — New (waiting for an editor)
-- **60** — In Production
-- **70** — Production Finished (in QC)
-- **80** — Delivered
+The name aliases above are the only names the CLI accepts; any numeric code can be passed. For the full status table, see `platform-get-image-status`.
 
 ## Success Criteria
 - Report the count as a clear number, e.g. "There are 142 delivered images in the account."

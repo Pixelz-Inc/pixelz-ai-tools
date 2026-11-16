@@ -20,7 +20,7 @@ node cli-tools/platform/node/cli.js delete <IMAGE_TICKET> [--customer-id <ID>]
 ## Workflow guidance
 1. **Confirm the ticket ID with the user before calling — this is destructive and cannot be undone.**
 2. Deletion is only possible before the image enters production (status < 60). Check with
-   `platform-get-image-status` first if you are unsure.
+   `platform-get-image-status` first if you are unsure; it has the full status table.
 3. If successful, confirm the deletion.
 4. If it fails with "Image in production," explain that the work has already started and cannot be cancelled.
 

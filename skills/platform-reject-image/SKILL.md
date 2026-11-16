@@ -21,7 +21,7 @@ node cli-tools/platform/node/cli.js reject <TICKET> "<COMMENT>" [--markupImageUr
 ## Workflow Guidance
 1. Confirm the ticket GUID and correction description with the user before submitting.
 2. Encourage the user to be specific in the comment (e.g., "Background colour should be pure white #FFFFFF, not off-white" rather than "fix the background").
-3. After rejection, the image status resets from 80 to a processing state — use `platform-get-image-status` to track it back to delivery.
+3. After rejection, the image moves from 80 to 40 (Returned for production) and back into the queue — use `platform-get-image-status` to track it back to delivery. For the full status table, see that skill.
 
 ## Success Criteria
 - Confirm the rejection was submitted successfully.

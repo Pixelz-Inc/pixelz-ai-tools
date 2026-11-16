@@ -11,9 +11,11 @@ Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your 
 | Node.js | v22.21 or higher | `node --version` |
 | pnpm | v11 or higher — only for the Node.js MCP track | `pnpm --version` |
 | Python | v3.10 or higher | `python --version` |
-| pip | v26.0 or higher (older pip works, but cannot enforce the 7-day release quarantine) | `pip --version` |
+| Python `venv` module | Included with Python; Debian/Ubuntu need `sudo apt install python3-venv` | `python -m venv --help` |
 
 You only need Node.js **or** Python depending on your language choice during installation — not both. The Node.js CLI tools use only Node's built-ins (`fetch`, `process.loadEnvFile`), so the Node.js Skills track installs no packages at all.
+
+The Python track never touches your system Python: the installer creates a virtual environment, installs `pip==26.2.1` into it (so the 7-day release quarantine is enforced whatever pip your system ships), and installs the pinned dependencies there. This also works on Homebrew/Debian/Ubuntu Pythons that refuse global installs (PEP 668).
 
 ---
 
@@ -23,7 +25,7 @@ This toolkit offers two paths for integration. During installation, you choose *
 
 ### Track 1: MCP Servers (Native Tooling)
 
-For AI agents that support the **Model Context Protocol (MCP)**. Exposes Pixelz endpoints as native tools the AI can call directly. Includes automatic local file handling, full parameter support, Zod input validation (Node.js), and real-time execution. Available in both **Node.js (TypeScript)** and **Python**.
+For AI agents that support the **Model Context Protocol (MCP)**. Exposes Pixelz endpoints as native tools the AI can call directly. Includes automatic local file handling, full parameter support, input validation before anything is sent, tool annotations (read-only / destructive hints), and real-time execution. Available in both **Node.js (TypeScript)** and **Python**.
 
 Both servers implement the **2026-07-28** MCP specification (stateless core, `server/discover`,
 cacheable list results) via MCP SDK v2 — `@modelcontextprotocol/server` 2.3.1 on Node.js and
@@ -79,6 +81,27 @@ chmod +x scripts/install.sh
 ./scripts/install.sh
 ```
 
+#### Non-interactive install (scripts, CI, AI agents)
+
+Every prompt can be answered with a flag. Anything you leave out is still asked for; without a terminal the installer exits with an error listing the missing flags instead of waiting.
+
+| Bash | PowerShell | Values |
+|------|------------|--------|
+| `--lang` | `-Lang` | `node` or `python` |
+| `--track` | `-Track` | `mcp` or `skills` |
+| `--agent` | `-Agent` | `claude`, `codex`, `copilot`, `cursor`, `antigravity`, `windsurf`, `opencode`, `universal` (`universal`: skills only) |
+| `--scope` | `-Scope` | `global` or `local` |
+| `--target` | `-Target` | project folder for `local` (implies `local` when the scope is omitted) |
+
+```powershell
+.\scripts\install.ps1 -Lang python -Track skills -Agent claude -Scope local -Target C:\Projects\my-shop
+```
+```bash
+./scripts/install.sh --lang python --track skills --agent claude --scope local --target ~/projects/my-shop
+```
+
+Run `./scripts/install.sh --help` for the same list.
+
 ### 3. Configure Credentials
 
 The installer creates a `.env` file from the included template and prints its location. Open it and fill in your API keys:
@@ -91,11 +114,13 @@ You only need keys for the API(s) you intend to use (Platform, Automation, or bo
 ### What the Installer Does
 
 1. Prompts you to choose a **language** (Node.js or Python), **track** (MCP or Skills), **AI agent**, and **install scope** (global or local).
-2. Installs dependencies and builds servers (MCP track), or deploys the 22 skills (Skills track — the Python CLI's packages are pip-installed; the Node.js CLI needs none).
+2. Installs dependencies and builds servers (MCP track), or deploys the 22 skills (Skills track — the Python CLI's packages are pip-installed into a virtual environment; the Node.js CLI needs none). The virtual environment is `.venv` in the repository for a global install, or `.pixelz/venv` in your project for a local one; the MCP servers and the skills are registered with that environment's interpreter by absolute path.
 3. Creates the `.env` file from the template.
 4. **Registers everything with your agent** — no manual config editing. MCP servers are added to the agent's own config file (or via `claude mcp add` for Claude Code). Your existing settings and servers are kept, your original file is saved next to it as `<file>.pixelz-backup` the first time the installer changes it (reinstalling never overwrites that backup), and a file the installer cannot safely rewrite (for example JSON with comments, or a file that is not UTF-8) is left untouched with the entries printed for you to paste.
 
-**Local installs** put everything they add to your project — the CLI tools and the `.env` — in a single `.pixelz/` folder. Your own `package.json`, lockfile and `requirements.txt` are never touched, and `.pixelz/` ignores itself in git so the `.env` cannot be committed by accident.
+**Local installs** put everything they add to your project — the CLI tools, the shared module they load (`.pixelz/shared/`), the `.env` and, for Python, the virtual environment — in a single `.pixelz/` folder. Your own `package.json`, lockfile and `requirements.txt` are never touched, and `.pixelz/` ignores itself in git so the `.env` cannot be committed by accident.
+
+**Versions and updates:** every install prints the Pixelz AI Tools version (the `version` in `package.json`), and a local install records it in `.pixelz/VERSION`. To update, `git pull` and run the installer again with the same choices; when the stamped version differs it prints `Updating Pixelz tools in <target> from X to Y` and replaces the copied CLI tools. Your `.env` is kept.
 
 ### Supported Agents
 
@@ -129,7 +154,8 @@ pixelz-ai-tools/
 ├── cli-tools/            # CLI utilities supporting the Skills track (Node.js & Python)
 │   ├── platform/         #   Platform API CLI
 │   └── automation/       #   Automation API CLI
-├── scripts/              # Interactive installers and uninstallers
+├── shared/               # Code both tracks load: HTTP, redaction, logging, validation (Node.js & Python)
+├── scripts/              # Installers and uninstallers (interactive, or driven by flags)
 │   ├── agents.json       #   Where each AI agent reads skills and MCP config
 │   └── agent-config.mjs  #   Registers/unregisters with agents (Python twin: agent_config.py)
 ├── tests/                # Test suite
@@ -144,7 +170,7 @@ pixelz-ai-tools/
 ## Testing
 
 ```bash
-# One-time setup: the Node suite spawns the CLIs (both languages) and imports the built servers
+# One-time setup: the Node suite spawns the CLIs (both languages), imports the servers and compares the Node and Python tool lists
 (cd mcp-servers/platform/node && pnpm install && pnpm run build)
 (cd mcp-servers/automation/node && pnpm install && pnpm run build)
 # --uploaded-prior-to P7D (the 7-day quarantine) needs pip 26.1+; pip 26.0 takes an absolute date instead
@@ -164,7 +190,7 @@ ruff check .                                              # Python (correctness 
 cd tests/node && pnpm exec tsc -p tsconfig.clitools.json  # CLI tools (type-check)
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup, and [CHANGELOG.md](CHANGELOG.md) for what changed between versions.
 
 ---
 
@@ -175,7 +201,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full development setup.
 .\scripts\uninstall.ps1   # Windows
 ```
 
-The uninstaller removes only what Pixelz added: the two `pixelz-*` MCP servers from the agent's config, the 22 Pixelz skill folders (your other skills stay), and — for a local install — the project's `.pixelz/` folder, unless another agent in the same project still uses it. It also cleans up locations that earlier versions of the installer used.
+The uninstaller removes only what Pixelz added: the two `pixelz-*` MCP servers from the agent's config, the 22 Pixelz skill folders (your other skills stay), and — for a local install — the project's `.pixelz/` folder (including its Python virtual environment), unless another agent in the same project still uses it. It also cleans up locations that earlier versions of the installer used. A global install's `.venv` in the repository is not deleted; remove it yourself if you no longer use the Python track.
+
+It takes flags too, so it can be scripted:
+
+```powershell
+.\scripts\uninstall.ps1 -Agent claude -Scope local -Target C:\Projects\my-shop
+```
+```bash
+./scripts/uninstall.sh --agent claude --scope local --target ~/projects/my-shop
+```
 
 ---
 

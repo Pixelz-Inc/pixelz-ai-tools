@@ -23,4 +23,6 @@ node cli-tools/platform/node/cli.js add-color-library "<PATH_OR_URL>" ["<PATH_OR
 ## Troubleshooting
 - If an `[AUTH_ERROR]` occurs, the user needs to set `PIXELZ_PLATFORM_API_KEY` and `PIXELZ_PLATFORM_EMAIL` in their `.env` file.
 - If a `[PRESIGN_UNAVAILABLE]` error occurs, the account is not enabled for direct file uploads. Ask the user to provide publicly accessible image URLs instead of local file paths.
+- Local files must be image files. The CLI rejects non-image extensions with `[VALIDATION_ERROR]`.
+- Submitting creates a billable retouching order. Confirm with the user before submitting unless they have clearly asked for it.
 ---

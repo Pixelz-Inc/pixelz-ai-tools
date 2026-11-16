@@ -81,6 +81,18 @@ A key shared pattern in both MCP servers and CLI tools: when a local file path i
 
 Flow: detect local path → request presigned URL from API → binary PUT to S3 → receive download URL → pass download URL to processing endpoint.
 
+## Shared Modules
+
+Everything not specific to one API or tool lives once per language in `shared/node/pixelz-common.js`
+(CommonJS, Node built-ins only, typed for the TS servers by `pixelz-common.d.ts`) and
+`shared/python/pixelz_common.py`: HTTP with retries, redaction, logging, `.env` loading, local-file
+checks, upload allowlists, argument parsing and shared validators. Consumers load it from
+`../../../shared/<lang>/` relative to themselves; local Skills installs copy it to
+`.pixelz/shared/<lang>/`. Fix shared behaviour there, not in a consumer.
+
+The repo-root `package.json` `version` is the single version number (servers report it, installers
+stamp it into `.pixelz/VERSION`); user-visible changes get a `CHANGELOG.md` entry.
+
 ## Dual Language Parity
 
 Every component exists in both Node.js and Python with identical functionality:

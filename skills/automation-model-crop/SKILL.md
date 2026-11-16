@@ -19,6 +19,8 @@ If the user has not provided a full file path or URL, ask for it before proceedi
 - `--bottom`: (Optional) The anatomical feature to align the bottom of the crop to.
 - `--callback`: (Optional) Webhook URL for asynchronous result delivery.
 
+At least ONE of `--top` / `--bottom` is required. The API rejects a request with neither, and the CLI returns `[VALIDATION_ERROR]` in that case.
+
 ### Supported Feature Locations (Enums)
 Use these exact strings for `--top` and `--bottom`:
 - `eye_higher`: Highest point of the eyes.
@@ -52,4 +54,9 @@ The command runs asynchronously by default. The response contains a `job_id`. Af
 
 ## Synchronous mode (advanced users only)
 Add `--sync` to the command to get the result immediately. Only do this if the user explicitly asks — it may time out on large images.
+
+## Troubleshooting
+- Local files must be JPG, JPEG, PNG or WEBP. Any other extension returns `[VALIDATION_ERROR]`. A public URL is not checked locally.
+- If `[VALIDATION_ERROR]` is returned with no `--top` or `--bottom`, pass at least one of them.
+- If `[UPLOAD_UNAVAILABLE]` occurs, the account is not enabled for direct file uploads (it is off by default on the Automation API). Ask the user for a publicly accessible image URL instead. Do not retry with a local path.
 ---

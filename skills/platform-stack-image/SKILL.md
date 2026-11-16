@@ -32,4 +32,9 @@ node cli-tools/platform/node/cli.js stack "<PATH_OR_URL>" [--template <ID>] [--c
 ## Success Criteria
 - Confirm each part was submitted and record its `ImageTicket` GUID.
 - Warn the user if submissions are taking too long (approaching the 5-minute window).
+
+## Troubleshooting
+- Local files must be image files. The CLI rejects non-image extensions with `[VALIDATION_ERROR]`.
+- Submitting creates a billable retouching order. Confirm with the user before submitting unless they have clearly asked for it.
+- If a `[PRESIGN_UNAVAILABLE]` error occurs, the account is not enabled for direct file uploads. Ask the user for a publicly accessible image URL instead. Do not retry with a local path.
 ---

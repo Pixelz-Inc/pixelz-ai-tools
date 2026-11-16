@@ -23,9 +23,10 @@ cd mcp-servers/automation/node && pnpm install && pnpm run build
 
 ## Running tests
 
-**Node.js (Vitest):** needs both MCP servers built and the Python CLI dependencies installed
-first — the suite spawns both CLIs and imports the built servers. See the
-README's Testing section for the full one-time setup.
+**Node.js (Vitest):** needs both MCP servers' dependencies installed (`pnpm install` in each) and
+the Python CLI and server dependencies installed first — the suite spawns both CLIs, imports the
+servers' `src/`, and compares the Node and Python servers' tool lists. See the README's Testing
+section for the full one-time setup.
 ```bash
 cd tests/node && pnpm install && pnpm exec vitest run
 ```
@@ -84,14 +85,36 @@ Any tool that accepts an image input must silently detect local file paths, uplo
 ### No runtime dependencies in the CLIs
 The Node CLIs (and the HTTP/env code in the Node MCP servers) use only Node built-ins: `fetch` for
 HTTP, `fs.openAsBlob` for uploads, `process.loadEnvFile` for `.env`. Keep it that way — it is what
-lets the Skills track run with nothing installed. Each file carries its own small `request()`
-helper (retries, timeout, error categories) because local installs copy each CLI on its own.
+lets the Skills track run with nothing installed.
+
+### Shared modules
+Code that is not specific to one API or one tool lives once per language, in
+`shared/node/pixelz-common.js` (CommonJS, built-ins only; `pixelz-common.d.ts` types it for the
+TypeScript servers) and `shared/python/pixelz_common.py`: HTTP with retries, redaction, logging,
+`.env` loading, local-file checks, upload allowlists, argument parsing and the validators both
+tracks use. The CLIs and servers load it from `../../../shared/<lang>/` relative to themselves, and
+a local Skills install copies it to `.pixelz/shared/<lang>/` — keep that relative layout. Put a fix
+there rather than in a consumer whenever it applies to more than one of them.
 
 ### Input validation
-Node.js MCP servers validate all tool arguments at runtime using Zod schemas. If you add a new tool or modify parameters, update the corresponding schema.
+Validate before any network call and report `[VALIDATION_ERROR] …`. Node MCP servers validate with
+Zod schemas (and advertise the same rules in the hand-written JSON Schema); Python servers and
+both CLIs use the shared validators. If you add a tool or change a parameter, change it in both
+languages: `tests/node/platform/toolParity.test.ts` compares the two servers' tool lists and fails
+on any difference in names, parameters, required fields, enums or annotations. Avoid `oneOf` /
+`anyOf` in advertised tool schemas — some agent clients reject them; state the rule in the
+description and enforce it in the handler.
 
 ### CLI flag syntax
-Both `--key=value` and `--key value` (space-separated) must be supported. The Node CLI `parseArgs()` function handles this; preserve that behaviour.
+Both `--key=value` and `--key value` (space-separated) must be supported, and the Node and Python
+CLIs must reject the same inputs with the same first stderr line and exit code
+(`tests/node/*/cliValidation.test.ts` asserts this). The Python CLIs define flags with argparse;
+the Node CLIs declare the same flags in a spec table.
+
+### Versions
+The repo-root `package.json` `version` is the only version number: the servers report it, the
+installers print it and stamp it into `.pixelz/VERSION`. Bump it and add a `CHANGELOG.md` entry
+for any change a user would notice.
 
 ### Installers and agents
 `scripts/install.*` and `scripts/uninstall.*` own the menus and dependency installs only. Everything

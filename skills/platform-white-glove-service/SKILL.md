@@ -30,4 +30,9 @@ node cli-tools/platform/node/cli.js white-glove "<PATH_OR_URL>" [--comment <TEXT
 - Confirm the image was submitted and record the returned `ImageTicket` GUID.
 - Use `platform-get-image-status` with that ticket to track progress.
 - Note that White Glove jobs may take longer than standard template jobs due to the manual review step.
+
+## Troubleshooting
+- Local files must be image files. The CLI rejects non-image extensions with `[VALIDATION_ERROR]`.
+- Submitting creates a billable retouching order. Confirm with the user before submitting unless they have clearly asked for it.
+- If a `[PRESIGN_UNAVAILABLE]` error occurs, the account is not enabled for direct file uploads. Ask the user for a publicly accessible image URL instead. Do not retry with a local path.
 ---

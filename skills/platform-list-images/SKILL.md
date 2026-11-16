@@ -14,6 +14,7 @@ This skill allows you to retrieve history and progress for multiple images in th
 - `--status`: (Optional) Filter by status. Accepts either a numeric code or a name:
   `10`/`new`, `60`/`in production`, `70`/`production finished`, `80`/`delivered`.
   Names are case-insensitive. `--imageStatus` works as an alias.
+  For the full status table, see `platform-get-image-status`.
 - `--excludeImageStatus`: (Optional) Do not show images with this status. Accepts the same
   codes and names.
 - `--productId`: (Optional) Show only images belonging to this product batch.
