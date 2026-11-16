@@ -5,6 +5,15 @@ the installers print it, and a local install records it in `.pixelz/VERSION`.
 
 To update an existing install: `git pull`, then re-run the installer with the same choices.
 
+## Unreleased
+
+- Dependencies: `@modelcontextprotocol/server` 2.4.0, `zod` 4.6.7, `@types/node` 24.19.2,
+  `python-dotenv` 1.2.4, `ruff` 0.17.4, `responses` 0.26.3, and the `setup-python` /
+  `pnpm/action-setup` actions. Clears every `pnpm audit` advisory: the MCP SDK's nested `zod`
+  is deduplicated to 4.6.7, and the test runner moves to `vitest` 4.1.12 with `vite` 7.3.7 and
+  `esbuild` 0.28.2 pinned (test tooling only; nothing users install). Dependabot now opens one grouped PR per ecosystem and no longer
+  proposes major `@types/node` bumps.
+
 ## 2.1.0 — 2026-11-16
 
 ### Changed behaviour you may notice

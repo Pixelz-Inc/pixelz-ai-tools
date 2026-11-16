@@ -28,7 +28,7 @@ This toolkit offers two paths for integration. During installation, you choose *
 For AI agents that support the **Model Context Protocol (MCP)**. Exposes Pixelz endpoints as native tools the AI can call directly. Includes automatic local file handling, full parameter support, input validation before anything is sent, tool annotations (read-only / destructive hints), and real-time execution. Available in both **Node.js (TypeScript)** and **Python**.
 
 Both servers implement the **2026-07-28** MCP specification (stateless core, `server/discover`,
-cacheable list results) via MCP SDK v2 — `@modelcontextprotocol/server` 2.3.1 on Node.js and
+cacheable list results) via MCP SDK v2 — `@modelcontextprotocol/server` 2.4.0 on Node.js and
 `mcp` 2.3.0 on Python. Clients still speaking a 2025-era revision are served unchanged through
 the legacy `initialize` handshake, so older agent CLIs keep working without any config change.
 

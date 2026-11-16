@@ -7,10 +7,12 @@
     "lint:clitools": "tsc -p tsconfig.clitools.json"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
     "typescript": "7.0.2",
-    "vitest": "4.1.10",
-    "zod": "4.4.3"
+    "vite": "7.3.7",
+    "vitest": "4.1.12",
+    "zod": "4.6.7"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -13,6 +13,15 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # One PR per ecosystem instead of one per package per directory: the same package is pinned
+    # in several directories and must move together (zod in the servers and the tests).
+    groups:
+      all:
+        patterns: ["*"]
+    ignore:
+      # Typings follow the oldest supported Node line, not the newest release.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "pip"
     directories:
@@ -24,6 +33,11 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # One PR per ecosystem instead of one per package per directory: the same package is pinned
+    # in several directories and must move together (zod in the servers and the tests).
+    groups:
+      all:
+        patterns: ["*"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -31,3 +45,8 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # One PR per ecosystem instead of one per package per directory: the same action is pinned
+    # in both workflows.
+    groups:
+      all:
+        patterns: ["*"]
