@@ -7,7 +7,7 @@
     "lint:clitools": "tsc -p tsconfig.clitools.json"
   },
   "devDependencies": {
-    "@types/node": "24.13.3",
+    "@types/node": "26.6.6",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
     "zod": "4.4.3"
