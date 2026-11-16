@@ -82,7 +82,7 @@ jobs:
       # The cliFlags tests assert Node and Python send identical API params, so they
       # shell out to `python cli.py`, and toolParity imports the Python servers to compare
       # their tool lists with Node's -- this job needs the Python CLI and server deps too.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       # pip 26.1+ understands P7D; 26.2.1 is the newest release past the 7-day window itself.
@@ -123,7 +123,7 @@ jobs:
         python: ['3.10', '3.12']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - name: Pin pip
