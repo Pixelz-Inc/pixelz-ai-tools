@@ -52,8 +52,18 @@ jobs:
         working-directory: mcp-servers/automation/node
 
   test-node:
-    name: Test (Node.js)
-    runs-on: ubuntu-latest
+    name: Test (Node.js ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the supported floor (engines >=22.21.0), 24 the current line.
+        os: [ubuntu-latest]
+        node: ['22', '24']
+        include:
+          # Windows is shipped to (PowerShell installer, Windows-specific code paths), so test it once.
+          - os: windows-latest
+            node: '24'
     # No `needs:` on the build jobs: the tests import the servers' src/ (not build/), so all three
     # jobs run in parallel and the build jobs stay a pure compile check.
     steps:
@@ -63,7 +73,7 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node }}
           cache: 'pnpm'
           cache-dependency-path: |
             mcp-servers/platform/node/pnpm-lock.yaml
@@ -82,10 +92,13 @@ jobs:
         env:
           # 7-day release quarantine for the transitive dependencies the requirements files don't pin.
           PIP_UPLOADED_PRIOR_TO: P7D
-      - name: Install MCP server dependencies
-        run: |
-          cd mcp-servers/platform/node && pnpm install --frozen-lockfile
-          cd ../../../mcp-servers/automation/node && pnpm install --frozen-lockfile
+      # Separate steps with working-directory so the same YAML runs under bash and pwsh.
+      - name: Install Platform MCP server dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: mcp-servers/platform/node
+      - name: Install Automation MCP server dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: mcp-servers/automation/node
       - name: Install test dependencies
         run: pnpm install --frozen-lockfile
         working-directory: tests/node
@@ -95,15 +108,23 @@ jobs:
       - name: Run tests
         run: pnpm exec vitest run
         working-directory: tests/node
+        env:
+          # Makes CI-gated test behaviour (and vitest's non-watch defaults) explicit on every runner.
+          CI: 'true'
 
   test-python:
-    name: Test (Python)
+    name: Test (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the supported floor, 3.12 the version the other jobs use.
+        python: ['3.10', '3.12']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - name: Pin pip
         run: python -m pip install pip==26.2.1
       - name: Install dependencies
@@ -117,3 +138,28 @@ jobs:
         run: ruff check .
       - name: Run tests
         run: python -m pytest tests/python/ -v
+
+  lint-ubuntu:
+    name: Lint (workspace copies, shell installers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The header of pnpm-workspace.yaml requires all four copies to change together.
+      - name: Check pnpm-workspace.yaml copies are identical
+        shell: bash
+        run: |
+          for f in mcp-servers/platform/node mcp-servers/automation/node tests/node; do
+            cmp pnpm-workspace.yaml "$f/pnpm-workspace.yaml" || { echo "::error::$f/pnpm-workspace.yaml differs from the root copy"; exit 1; }
+          done
+      # shellcheck is preinstalled on ubuntu-latest runners.
+      - name: ShellCheck installers
+        run: shellcheck --severity=error scripts/*.sh
+
+  lint-windows:
+    name: Lint (PowerShell installers)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # PSScriptAnalyzer is preinstalled on windows-latest (runner-images Windows2025-Readme), so no unpinned module install.
+      - name: PSScriptAnalyzer installers
+        run: Invoke-ScriptAnalyzer -Path scripts -Severity Error -EnableExit

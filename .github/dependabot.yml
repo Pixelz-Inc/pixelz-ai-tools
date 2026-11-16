@@ -1,0 +1,33 @@
+# Dependabot (rather than Renovate) because it needs no app installation.
+# Every ecosystem has a 7-day cooldown so update PRs respect the project's 7-day release quarantine
+# (cooldown applies to version updates only; security updates are not delayed).
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directories:
+      - "/"
+      - "/mcp-servers/platform/node"
+      - "/mcp-servers/automation/node"
+      - "/tests/node"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "pip"
+    directories:
+      - "/"
+      - "/mcp-servers/platform/python"
+      - "/mcp-servers/automation/python"
+      - "/tests/python"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
