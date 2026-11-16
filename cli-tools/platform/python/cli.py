@@ -3,79 +3,32 @@ import sys
 import json
 import re
 import requests
-from urllib.parse import quote, quote_plus
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-import argparse
-from dotenv import load_dotenv
 
-load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../shared/python')))
+import pixelz_common
+from pixelz_common import (
+    validate_id, is_read_timeout as _is_read_timeout, PLATFORM_UPLOAD_EXTENSIONS, HEX_COLOR,
+    resolve_status, check_api_error, is_url, int_arg, CliParser, RootParser)
+
+pixelz_common.load_env(__file__)
 
 # Overridable so tests can point at a local stub and assert the exact outgoing params.
 BASE_URL = os.environ.get('PIXELZ_PLATFORM_BASE_URL', 'https://api.pixelz.com/REST.svc/JSON')
-
-def redact_secrets(text):
-    """Replace known credential values and bearer tokens in text with <REDACTED>.
-
-    Credentials are matched in raw AND percent-encoded form: requests echoes the whole
-    request URL in ConnectionError text, and Platform auth travels as query params, so a
-    key containing + / = @ appears encoded there and a literal match silently misses it.
-    The param-name pass is the backstop for any encoding these variants don't anticipate.
-    """
-    s = str(text)
-    for key in ('PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL'):
-        val = os.getenv(key)
-        if not val:
-            continue
-        for variant in {val, quote(val, safe=''), quote_plus(val)}:
-            s = s.replace(variant, '<REDACTED>')
-    s = re.sub(r'(contactAPIkey|contactEmail)=[^&\s\'"]*', r'\1=<REDACTED>', s, flags=re.IGNORECASE)
-    s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
-    return s
 # Overridable so tests can exercise the timeout path without waiting 90 s.
 REQUEST_TIMEOUT = float(os.environ.get('PIXELZ_REQUEST_TIMEOUT_SECONDS') or 90)
 
-def _is_read_timeout(e):
-    """requests reports a timeout while reading the body as ConnectionError(ReadTimeoutError)."""
-    import urllib3
-    return bool(e.args) and isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError)
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+_session = pixelz_common.make_session()
 
-# raise_on_status=False: once retries run out, hand back the last response so raise_for_status()
-# reports [HTTP_<status>] (as Node does) instead of an uncategorized RetryError.
-# retry_after_max: the same 60 s ceiling as Node, so a huge Retry-After cannot park a call for hours.
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True,
-               raise_on_status=False, retry_after_max=60)
-_session = requests.Session()
-_session.mount('https://', HTTPAdapter(max_retries=_retry))
-_session.mount('http://', HTTPAdapter(max_retries=_retry))
+# Credentials are matched in raw AND percent-encoded form: requests echoes the whole
+# request URL in ConnectionError text, and Platform auth travels as query params, so a
+# key containing + / = @ appears encoded there and a literal match silently misses it.
+# The param-name pass is the backstop for any encoding these variants don't anticipate.
+redact_secrets = pixelz_common.make_redactor(
+    ('PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL'), ('contactAPIkey', 'contactEmail'))
+log = pixelz_common.make_logger(redact_secrets)
 
-_log_file = os.getenv('PIXELZ_LOG_FILE')
-
-def log(level, message, data=None):
-    if not _log_file:
-        return
-    from datetime import datetime, timezone
-    entry = f"[{datetime.now(timezone.utc).isoformat()}] [{level}] {message}"
-    if data is not None:
-        entry += f" {json.dumps(data, default=str)}"
-    # Redacted here, not at call sites: error text can carry a credentialed request URL.
-    with open(_log_file, 'a') as f:
-        f.write(redact_secrets(entry) + '\n')
-
-STATUS_ALIASES = {
-    'new': '10', 'in production': '60', 'production finished': '70', 'delivered': '80'
-}
-
-def resolve_status(value):
-    if value is None:
-        return value
-    lower = str(value).lower()
-    return STATUS_ALIASES.get(lower, value)
-
-def validate_id(value, name):
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
-        raise ValueError(f"Invalid {name}: contains unexpected characters")
+STATUS_HELP = ('Any numeric Platform status code. Only these names are aliases: '
+               'new (10), in production (60), production finished (70), delivered (80).')
 
 def get_auth():
     email = os.getenv('PIXELZ_PLATFORM_EMAIL')
@@ -88,51 +41,22 @@ def get_auth():
         sys.exit(1)
     return {'contactEmail': email, 'contactAPIkey': key}
 
-def check_api_error(data):
-    if isinstance(data, dict):
-        code = data.get('ErrorCode')
-        if code is not None and code != 'NoError' and code != 0:
-            raise Exception(f"[API_ERROR] {code}: {data.get('Message', '')}")
-
 def ensure_url(input_path):
     if not input_path:
         return None
-    if input_path.startswith(('http://', 'https://')):
+    if is_url(input_path):
         return input_path
-    if not os.path.exists(input_path):
-        raise Exception(f"Local file not found: {input_path}")
-    resolved = os.path.realpath(input_path)
-    if not os.path.isfile(resolved):
-        raise Exception(f"Not a regular file: {input_path}")
-    file_size = os.path.getsize(resolved)
-    if file_size > MAX_FILE_SIZE:
-        raise Exception(f"File too large ({file_size / (1024**3):.2f} GB). Maximum allowed size is 2 GB.")
+    resolved, file_size = pixelz_common.resolve_local_file(input_path, PLATFORM_UPLOAD_EXTENSIONS)
 
     auth = get_auth()
     file_name = os.path.basename(resolved)
     log('info', 'Requesting presigned URL', {'fileName': file_name})
     r = _session.post(f"{BASE_URL}/RequestPresignUrls", json={**auth, 'imageNames': [file_name]}, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
-    body = r.json()
-    # Documented shape is {"ErrorCode": "NoError", "Message": "", "PostingUrls": [...]}. ErrorCode
-    # is always present, so only a value other than NoError is a failure.
-    code = body.get('ErrorCode') if isinstance(body, dict) else None
-    if code not in (None, 'NoError', 0):
-        if code == 'InvalidCustomerInformation':
-            raise Exception(f"[AUTH_ERROR] Platform API rejected the credentials: {body.get('Message', '')}")
-        raise Exception(
-            f"[PRESIGN_UNAVAILABLE] {code}: {body.get('Message') or 'Presigned URL request failed'}. "
-            "The account may not be enabled for direct file uploads. "
-            "Provide a publicly accessible image URL instead of a local file path."
-        )
-    # A bare list is still accepted, as this code originally assumed that shape.
-    posting_urls = body.get('PostingUrls') if isinstance(body, dict) else body
-    if not isinstance(posting_urls, list) or not posting_urls:
-        raise Exception("RequestPresignUrls returned an unexpected response.")
-    target = posting_urls[0]
+    target = pixelz_common.parse_platform_presign(r.json())
     upload_url = target['UploadUrl']
     download_url = target['DownloadUrl']
-    
+
     log('info', 'Uploading file to S3', {'fileName': file_name, 'size': file_size})
     with open(resolved, 'rb') as f:
         r_put = _session.put(upload_url, data=f, headers={'Content-Type': 'application/octet-stream'}, timeout=REQUEST_TIMEOUT)
@@ -140,18 +64,52 @@ def ensure_url(input_path):
 
     return download_url
 
+def validate_args(args):
+    """Local checks that must fail before any request, mirroring the Node CLI."""
+    cmd = args.command
+    missing = [f'<{n}>' for n in ('id', 'input', 'ticket', 'comment') if getattr(args, n, None) == '']
+    if cmd == 'add-color-library' and any(not p for p in args.images):
+        missing.append('<images>')
+    if cmd == 'upload' and not args.template:
+        missing.append('--template')
+    if missing:
+        raise ValueError(f"[VALIDATION_ERROR] {cmd} requires {', '.join(missing)}")
+    if cmd == 'get-template':
+        validate_id(args.id, 'templateId')
+    elif cmd in ('status', 'delete', 'reject'):
+        validate_id(args.ticket, 'imageTicket')
+    if cmd == 'upload':
+        if args.swatchColorCode is not None and not HEX_COLOR.fullmatch(args.swatchColorCode):
+            raise ValueError("[VALIDATION_ERROR] --swatchColorCode must be a hex colour like #FF5733")
+        if args.colorwayIds:
+            try:
+                parsed = json.loads(args.colorwayIds)
+            except ValueError:
+                raise ValueError("[VALIDATION_ERROR] --colorwayIds is not valid JSON") from None
+            if not isinstance(parsed, list):
+                raise ValueError("[VALIDATION_ERROR] --colorwayIds must be a JSON array, e.g. [123,456]")
+            args.colorwayIds = parsed
+    elif cmd == 'list-images':
+        if args.imagesPerPage is not None and not 1 <= args.imagesPerPage <= 100:
+            raise ValueError("[VALIDATION_ERROR] --imagesPerPage must be between 1 and 100")
+        if args.sortBy is not None and args.sortBy not in ('id', 'date', 'status'):
+            raise ValueError("[VALIDATION_ERROR] --sortBy must be one of: id, date, status")
+        if args.isDescending is not None and args.isDescending not in ('true', 'false'):
+            raise ValueError("[VALIDATION_ERROR] --isDescending must be true or false")
+
 def main():
-    parser = argparse.ArgumentParser(description='Pixelz Platform CLI')
-    subparsers = parser.add_subparsers(dest='command')
+    parser = RootParser(description='Pixelz Platform CLI', epilog='--status: ' + STATUS_HELP)
+    subparsers = parser.add_subparsers(dest='command', parser_class=CliParser)
 
     subparsers.add_parser('list-templates')
-    
+
     get_template = subparsers.add_parser('get-template')
     get_template.add_argument('id')
 
     upload = subparsers.add_parser('upload')
     upload.add_argument('input')
-    upload.add_argument('--template', required=True)
+    # Not required=True: argparse would name the missing flag "--template/--templateId".
+    upload.add_argument('--template', '--templateId', dest='template')
     upload.add_argument('--imageURL2')
     upload.add_argument('--imageURL3')
     upload.add_argument('--imageURL4')
@@ -165,9 +123,9 @@ def main():
     upload.add_argument('--comment')
     upload.add_argument('--markupImageUrl')
     upload.add_argument('--swatchImageURL')
-    upload.add_argument('--swatchColorCode')
-    upload.add_argument('--markerX', type=int)
-    upload.add_argument('--markerY', type=int)
+    upload.add_argument('--swatchColorCode', help='Hex colour, e.g. #FF5733')
+    upload.add_argument('--markerX', type=int_arg)
+    upload.add_argument('--markerY', type=int_arg)
     upload.add_argument('--outputFileName')
     upload.add_argument('--customerImageColorID')
     upload.add_argument('--colorwayIds', help='JSON array of color library IDs, e.g. "[123,456]"')
@@ -188,7 +146,7 @@ def main():
 
     stack = subparsers.add_parser('stack')
     stack.add_argument('input')
-    stack.add_argument('--template')
+    stack.add_argument('--template', '--templateId', dest='template')
     stack.add_argument('--imageURL2')
     stack.add_argument('--imageURL3')
     stack.add_argument('--imageURL4')
@@ -205,24 +163,24 @@ def main():
     status.add_argument('--customer-id', '--customerImageId', dest='customer_id')
 
     list_images = subparsers.add_parser('list-images')
-    list_images.add_argument('--status', '--imageStatus', dest='status')
-    list_images.add_argument('--excludeImageStatus')
+    list_images.add_argument('--status', '--imageStatus', dest='status', help=STATUS_HELP)
+    list_images.add_argument('--excludeImageStatus', help=STATUS_HELP)
     list_images.add_argument('--productId')
     list_images.add_argument('--fromDate')
     list_images.add_argument('--toDate')
-    list_images.add_argument('--page', type=int)
-    list_images.add_argument('--imagesPerPage', type=int)
-    list_images.add_argument('--sortBy')
-    list_images.add_argument('--isDescending')
+    list_images.add_argument('--page', type=int_arg)
+    list_images.add_argument('--imagesPerPage', type=int_arg, help='1 to 100')
+    list_images.add_argument('--sortBy', help='id, date or status')
+    list_images.add_argument('--isDescending', help='true or false')
 
     count_images = subparsers.add_parser('count-images')
-    count_images.add_argument('--status', '--imageStatus', dest='status')
+    count_images.add_argument('--status', '--imageStatus', dest='status', help=STATUS_HELP)
     count_images.add_argument('--fromDate')
     count_images.add_argument('--toDate')
 
     list_products = subparsers.add_parser('list-products')
-    list_products.add_argument('--page', type=int)
-    list_products.add_argument('--per-page', type=int)
+    list_products.add_argument('--page', type=int_arg)
+    list_products.add_argument('--per-page', '--perPage', dest='per_page', type=int_arg)
 
     delete = subparsers.add_parser('delete')
     delete.add_argument('ticket')
@@ -242,17 +200,18 @@ def main():
     get_invoices = subparsers.add_parser('get-invoices')
     get_invoices.add_argument('--fromDate')
     get_invoices.add_argument('--toDate')
-    get_invoices.add_argument('--page', type=int)
+    get_invoices.add_argument('--page', type=int_arg)
     get_invoices.add_argument('--returnUrl')
 
-    args = parser.parse_args()
-    if not args.command:
-        parser.print_help()
+    args = pixelz_common.parse_cli_args(parser)
+    if args is None:
         return
 
-    auth = get_auth()
-
     try:
+        # Before credentials and before any request, as in the Node CLI.
+        validate_args(args)
+        auth = get_auth()
+
         def print_checked(r):
             r.raise_for_status()
             data = r.json()
@@ -263,7 +222,6 @@ def main():
             log('info', 'list-templates')
             print_checked(_session.get(f"{BASE_URL}/Templates", params=auth, timeout=REQUEST_TIMEOUT))
         elif args.command == 'get-template':
-            validate_id(args.id, 'templateId')
             log('info', 'get-template', {'id': args.id})
             print_checked(_session.get(f"{BASE_URL}/Template/{args.id}", params=auth, timeout=REQUEST_TIMEOUT))
         elif args.command == 'upload':
@@ -278,7 +236,7 @@ def main():
                 if val is not None:
                     payload[key] = val
             if args.colorwayIds:
-                payload['colorwayIds'] = json.loads(args.colorwayIds)
+                payload['colorwayIds'] = args.colorwayIds
             print_checked(_session.post(f"{BASE_URL}/Image", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'white-glove':
             log('info', 'white-glove')
@@ -302,7 +260,6 @@ def main():
                     payload[key] = val
             print_checked(_session.post(f"{BASE_URL}/StackImage", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'status':
-            validate_id(args.ticket, 'imageTicket')
             log('info', 'status', {'ticket': args.ticket})
             params = {**auth}
             if args.customer_id: params['customerImageId'] = args.customer_id
@@ -333,15 +290,13 @@ def main():
             params = {k: v for k, v in {**auth, 'page': args.page, 'productIdsPerPage': args.per_page}.items() if v is not None}
             print_checked(_session.get(f"{BASE_URL}/ProductIds", params=params, timeout=REQUEST_TIMEOUT))
         elif args.command == 'delete':
-            validate_id(args.ticket, 'imageTicket')
             log('info', 'delete', {'ticket': args.ticket})
             payload = {**auth}
             if args.customer_id: payload['customerImageId'] = args.customer_id
             print_checked(_session.delete(f"{BASE_URL}/Image/{args.ticket}", json=payload, timeout=REQUEST_TIMEOUT))
         elif args.command == 'reject':
-            validate_id(args.ticket, 'imageTicket')
             log('info', 'reject', {'ticket': args.ticket})
-            payload = {**auth, 'comment': args.comment}
+            payload = {**auth, 'imageTicket': args.ticket, 'comment': args.comment}
             if args.customer_id: payload['customerImageId'] = args.customer_id
             if args.markupImageUrl: payload['markupImageUrl'] = args.markupImageUrl
             print_checked(_session.put(f"{BASE_URL}/Image/Reject/{args.ticket}", json=payload, timeout=REQUEST_TIMEOUT))

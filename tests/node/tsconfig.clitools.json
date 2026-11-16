@@ -18,5 +18,5 @@
     // arrive only as a side effect of axios/dotenv's own declarations.
     "types": ["node"]
   },
-  "include": ["../../cli-tools/platform/node/cli.js", "../../cli-tools/automation/node/cli.js"]
+  "include": ["../../cli-tools/platform/node/cli.js", "../../cli-tools/automation/node/cli.js", "../../shared/node/**/*.js"]
 }

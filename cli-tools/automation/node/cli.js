@@ -1,155 +1,22 @@
 const path = require('path');
-const fs = require('fs');
-// Node's built-in .env loader (stable since 22.21). Like dotenv it never overrides variables
-// that are already set, and unlike dotenv it prints nothing to stdout (which carries JSON).
-// A missing file is fine: the credentials may come from the environment instead.
-const ENV_FILE = process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../.env');
-if (fs.statSync(ENV_FILE, { throwIfNoEntry: false })?.isFile()) process.loadEnvFile(ENV_FILE);
+const { UploadFile, validateId, filterNull, loadEnv, createRedactor, createLogger, createHttp, resolveLocalFile,
+    AUTOMATION_UPLOAD_EXTENSIONS, AUTOMATION_MIME_TYPES, HEX_COLOR, CROP_LOCATIONS, UPLOAD_UNAVAILABLE, isUrl } =
+    require(path.join(__dirname, '../../../shared/node/pixelz-common.js'));
+const { fail, requireHex, flag, runCli } = require(path.join(__dirname, '../../../shared/node/pixelz-cli.js'));
+loadEnv(path.resolve(__dirname, '../../../.env'));
 
 // Overridable so tests can point at a local stub and assert the exact outgoing payload.
 const AUTH_URL = process.env.PIXELZ_AUTOMATION_AUTH_URL || 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
 const BASE_URL = process.env.PIXELZ_AUTOMATION_BASE_URL || 'https://automation-api.pixelz.com/v1';
 // Overridable so tests can exercise the timeout path without waiting 90 s.
 const REQUEST_TIMEOUT = (Number(process.env.PIXELZ_REQUEST_TIMEOUT_SECONDS) || 90) * 1000;
-const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
-const MAX_RETRIES = 3;
-const RETRY_STATUS = new Set([429, 502, 503, 504]);
-// Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
-// it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
-const RETRY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
 
-// Socket-level failures worth another attempt on an idempotent request. undici (behind fetch)
-// reports a peer that closed the connection as UND_ERR_SOCKET and a stalled connect as
-// UND_ERR_CONNECT_TIMEOUT, where axios used ECONNRESET / ETIMEDOUT.
-const RETRY_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
-const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
-// Same ceiling as the Python sibling's Retry(retry_after_max=...): a huge Retry-After must not
-// park a CLI run or an MCP tool call for hours.
-const RETRY_AFTER_MAX_SECONDS = 60;
-
-// HTTP via Node's built-in fetch, shaped like the slice of axios this file used to rely on:
-// JSON in/out, a timeout, errors carrying .response / .code, and retries. No dependency, so the
-// CLI runs with nothing installed.
-class UploadFile {
-    /** @param {string} filePath */
-    constructor(filePath) { this.path = filePath; }
-}
-
-/** The OS error code behind a failed fetch, e.g. ECONNREFUSED; ECONNABORTED for our timeout. */
-function networkCode(err) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') return 'ECONNABORTED';
-    // fetch reports socket failures as TypeError('fetch failed') with the code on .cause, or on
-    // .cause.errors[] when every address refused (seen on Windows for ECONNREFUSED).
-    return err.cause?.code ?? err.cause?.errors?.find(e => e.code)?.code;
-}
-
-async function backoff(attempt, retryAfter) {
-    // Retry-After may be empty or an HTTP-date rather than seconds; those fall back to backoff.
-    const secs = retryAfter == null || retryAfter.trim() === '' ? NaN : Number(retryAfter);
-    const delay = Number.isFinite(secs)
-        ? Math.min(Math.max(secs, 0), RETRY_AFTER_MAX_SECONDS) * 1000
-        : Math.min(1000 * 2 ** attempt, 30000);
-    await new Promise(r => setTimeout(r, delay));
-}
-
-/**
- * @param {string} method
- * @param {string} url
- * @param {{ params?: Record<string, any>, body?: any, headers?: Record<string, string>, timeout?: number }} [opts]
- */
-async function request(method, url, { params, body, headers = {}, timeout = REQUEST_TIMEOUT } = {}) {
-    if (params) url += (url.includes('?') ? '&' : '?') + new URLSearchParams(filterNull(params));
-    for (let attempt = 0; ; attempt++) {
-        const retryable = RETRY_METHODS.has(method) && attempt < MAX_RETRIES;
-        /** @type {Record<string, string>} */
-        const h = { ...headers };
-        let payload = body;
-        if (body instanceof UploadFile) {
-            // A Blob backed by the file: streamed from disk with the Content-Length S3 requires (a
-            // stream body would go out chunked), and safe to send again on a retry.
-            payload = await fs.openAsBlob(body.path);
-        } else if (body !== undefined && !(body instanceof URLSearchParams)) {
-            payload = JSON.stringify(body);
-            h['Content-Type'] = h['Content-Type'] || 'application/json';
-        }
-        let res, text;
-        try {
-            res = await fetch(url, { method, headers: h, body: payload, signal: AbortSignal.timeout(timeout) });
-            // Inside the try and under the same signal: a stall mid-body is a timeout too.
-            text = await res.text();
-        } catch (e) {
-            const code = networkCode(e);
-            if (retryable && RETRY_CODES.has(code)) { await backoff(attempt, null); continue; }
-            const timedOut = TIMEOUT_CODES.has(code);
-            // Deliberately no URL in the message: Platform credentials travel in the query string.
-            throw Object.assign(new Error(code ? `${e.message} (${code})` : e.message),
-                { code: timedOut ? 'ECONNABORTED' : code, network: !timedOut && code !== 'ERR_INVALID_URL' });
-        }
-        let data = text, isJson = true;
-        try { data = text ? JSON.parse(text) : ''; } catch { isJson = false; }
-        if (res.ok) {
-            // A 2xx that is not JSON is a proxy or login page, not an API answer (Python fails too).
-            if (!isJson) throw new Error(`[API_ERROR] Expected a JSON response (HTTP ${res.status}), got: ${redactSecrets(text).slice(0, 100)}`);
-            return { status: res.status, data };
-        }
-        if (retryable && RETRY_STATUS.has(res.status)) {
-            await backoff(attempt, res.headers.get('retry-after'));
-            continue;
-        }
-        throw Object.assign(new Error(`Request failed with status code ${res.status}`), { response: { status: res.status, data } });
-    }
-}
-
-const http = {
-    get: (url, opts = {}) => request('GET', url, opts),
-    post: (url, body, opts = {}) => request('POST', url, { ...opts, body }),
-    put: (url, body, opts = {}) => request('PUT', url, { ...opts, body }),
-    delete: (url, opts = {}) => request('DELETE', url, opts),
-};
-
-// fetch's timeout covers the whole request, where axios's was socket inactivity, so an upload's
-// limit must include the transfer itself. 32 KB/s (~256 kbit/s) keeps slow uplinks working.
-const uploadTimeout = size => REQUEST_TIMEOUT + Math.ceil(size / (32 * 1024)) * 1000;
-
-function redactSecrets(text) {
-    let s = String(text);
-    for (const key of ['PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET']) {
-        const val = process.env[key];
-        if (!val) continue;
-        // Match raw AND percent-encoded forms: a credential echoed back inside a URL
-        // appears encoded, where a literal match would silently miss it.
-        // URLSearchParams (our query strings) encodes !'()~ and spaces differently from encodeURIComponent.
-        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val), new URLSearchParams({ v: val }).toString().slice(2)])) {
-            s = s.replaceAll(variant, '<REDACTED>');
-        }
-    }
-    // Backstop by param name, so an encoding the variants above miss still cannot leak.
-    s = s.replace(/(client_id|client_secret)=[^&\s'"]*/gi, '$1=<REDACTED>');
-    return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
-}
-
-const logFile = process.env.PIXELZ_LOG_FILE;
-function log(level, message, data) {
-    if (!logFile) return;
-    const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    // Redacted here, not at call sites: error text can carry a credentialed request URL.
-    // Synchronous: the CLI calls process.exit() on failure, which would drop a pending async write.
-    try {
-        fs.appendFileSync(logFile, redactSecrets(entry));
-    } catch (err) {
-        process.stderr.write('Log write failed: ' + err.message + '\n');
-    }
-}
-
-function validateId(value, name) {
-    if (!/^[a-zA-Z0-9_\-]+$/.test(value)) {
-        throw new Error(`Invalid ${name}: contains unexpected characters`);
-    }
-}
-
-function filterNull(obj) {
-    return Object.fromEntries(Object.entries(obj).filter(([_, v]) => v != null));
-}
+const redactSecrets = createRedactor({
+    envKeys: ['PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'],
+    paramNames: ['client_id', 'client_secret'],
+});
+const log = createLogger(redactSecrets);
+const { http, uploadTimeout } = createHttp({ timeout: REQUEST_TIMEOUT, redactSecrets });
 
 const tokenCache = { token: null, expiresAt: 0 };
 let tokenPromise = null;
@@ -187,26 +54,30 @@ Required: PIXELZ_AUTOMATION_CLIENT_ID and PIXELZ_AUTOMATION_CLIENT_SECRET in .en
     return tokenPromise;
 }
 
-const MIME_TYPES = {
-    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.png': 'image/png', '.webp': 'image/webp'
-};
+/** Rejects a bad local file before the token exchange, so it costs no round-trip. */
+function checkLocalInput(input) {
+    if (!isUrl(input)) resolveLocalFile(input, AUTOMATION_UPLOAD_EXTENSIONS);
+}
 
 async function ensureUrlOrId(input, token) {
     if (!input) return null;
-    if (input.startsWith('http://') || input.startsWith('https://')) return input;
-    if (!fs.existsSync(input)) throw new Error(`Local file not found: ${input}`);
-    const resolved = fs.realpathSync(input);
-    if (!fs.statSync(resolved).isFile()) throw new Error(`Not a regular file: ${input}`);
-    const fileSize = fs.statSync(resolved).size;
-    if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
+    if (isUrl(input)) return input;
+    const { resolved, fileSize } = resolveLocalFile(input, AUTOMATION_UPLOAD_EXTENSIONS);
     const fileName = path.basename(resolved);
     log('info', 'Requesting upload URL', { fileName });
-    const presignRes = await http.post(`${BASE_URL}/files/request-upload-url`, { fileName }, {
-        headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
-    });
-    const uploadUrl = presignRes.data.url;
-    const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
+    let presignRes;
+    try {
+        presignRes = await http.post(`${BASE_URL}/files/request-upload-url`, { fileName }, {
+            headers: { Authorization: `Bearer ${token}` }, timeout: REQUEST_TIMEOUT
+        });
+    } catch (/** @type {any} */ err) {
+        if (err.response?.status === 403) throw new Error(UPLOAD_UNAVAILABLE);
+        throw err;
+    }
+    const uploadUrl = presignRes.data?.url;
+    if (!uploadUrl) throw new Error('Upload URL request returned an unexpected response.');
+    // The allowlist keeps this a known type; octet-stream only applies under PIXELZ_UPLOAD_ANY_FILE_TYPE.
+    const contentType = AUTOMATION_MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
     log('info', 'Uploading file', { fileName, size: fileSize });
     await http.put(uploadUrl, new UploadFile(resolved), { headers: { 'Content-Type': contentType }, timeout: uploadTimeout(fileSize) });
     return uploadUrl;
@@ -218,20 +89,65 @@ function makeHeaders(token, sync = false) {
     return h;
 }
 
+function requireFeather(value) {
+    if (value != null && value < 0) throw fail('--feather must be >= 0');
+}
+
+const isPlainObject = (/** @type {any} */ v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const isInt = (/** @type {any} */ v) => Number.isInteger(v);
+
+/**
+ * Validates MARKERS_JSON against the API's ColorMarker schema and returns the parsed markers.
+ * @param {string} text
+ */
+function parseMarkers(text) {
+    let markers;
+    try {
+        markers = JSON.parse(text);
+    } catch {
+        throw fail('MARKERS_JSON is not valid JSON');
+    }
+    if (!Array.isArray(markers) || markers.length === 0) throw fail('MARKERS_JSON must be a non-empty JSON array of markers');
+    markers.forEach((m, i) => {
+        const at = `MARKERS_JSON[${i}]`;
+        if (!isPlainObject(m)) throw fail(`${at} must be an object`);
+        if (!isInt(m.x_coordinate) || !isInt(m.y_coordinate)) throw fail(`${at} needs integer x_coordinate and y_coordinate`);
+        const hasColor = m.swatch_color_code != null;
+        const hasImage = m.swatch_image != null;
+        if (hasColor === hasImage) throw fail(`${at} needs exactly one of swatch_color_code or swatch_image`);
+        if (hasColor && !(typeof m.swatch_color_code === 'string' && HEX_COLOR.test(m.swatch_color_code))) {
+            throw fail(`${at}.swatch_color_code must be a hex colour like #FF5733`);
+        }
+        if (hasImage) {
+            const s = m.swatch_image;
+            if (!isPlainObject(s) || typeof s.swatch_image_url !== 'string' || !s.swatch_image_url
+                || !isInt(s.x_coordinate) || !isInt(s.y_coordinate)) {
+                throw fail(`${at}.swatch_image needs swatch_image_url and integer x_coordinate and y_coordinate`);
+            }
+        }
+    });
+    return markers;
+}
+
+/** @typedef {Record<string, any>} Options */
+
 const commands = {
-    'remove-bg': async (input, options = {}) => {
-        log('info', 'remove-bg');
+    'remove-bg': async (/** @type {string[]} */ [input], /** @type {Options} */ options) => {
+        requireHex('--color', options.color);
+        requireFeather(options.feather);
         // The API takes exactly one of the two ("do not set both, and do not leave both unset").
-        const transparent = options.transparent !== undefined ? String(options.transparent) === 'true' : !options.color;
-        if (options.color && transparent) throw new Error('[VALIDATION_ERROR] --color and --transparent true cannot be used together');
-        if (!options.color && !transparent) throw new Error('[VALIDATION_ERROR] --transparent false requires --color');
+        const transparent = options.transparent !== undefined ? options.transparent === 'true' : !options.color;
+        if (options.color && transparent) throw fail('--color and --transparent true cannot be used together');
+        if (!options.color && !transparent) throw fail('--transparent false requires --color');
+        checkLocalInput(input);
+        log('info', 'remove-bg');
         const token = await getAccessToken();
         const urlOrId = await ensureUrlOrId(input, token);
         const payload = filterNull({
             image_url: urlOrId,
             background_color: options.color,
             transparent_background: transparent,
-            feather_width: options.feather ? parseFloat(options.feather) : undefined,
+            feather_width: options.feather,
             trimap_url: options.trimap,
             callback_url: options.callback
         });
@@ -240,13 +156,15 @@ const commands = {
         });
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'color-match': async (input, markersJson, options = {}) => {
+    'color-match': async (/** @type {string[]} */ [input, markersJson], /** @type {Options} */ options) => {
+        const markers = parseMarkers(markersJson);
+        checkLocalInput(input);
         log('info', 'color-match');
         const token = await getAccessToken();
         const urlOrId = await ensureUrlOrId(input, token);
         const payload = filterNull({
             image_url: urlOrId,
-            color_markers: JSON.parse(markersJson),
+            color_markers: markers,
             callback_url: options.callback
         });
         const res = await http.post(`${BASE_URL}/images/color-matching`, payload, {
@@ -254,13 +172,15 @@ const commands = {
         });
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'create-mask': async (input, options = {}) => {
+    'create-mask': async (/** @type {string[]} */ [input], /** @type {Options} */ options) => {
+        requireFeather(options.feather);
+        checkLocalInput(input);
         log('info', 'create-mask');
         const token = await getAccessToken();
         const urlOrId = await ensureUrlOrId(input, token);
         const payload = filterNull({
             image_url: urlOrId,
-            feather_width: options.feather ? parseFloat(options.feather) : undefined,
+            feather_width: options.feather,
             trimap_url: options.trimap,
             callback_url: options.callback
         });
@@ -269,7 +189,8 @@ const commands = {
         });
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'create-trimap': async (input, options = {}) => {
+    'create-trimap': async (/** @type {string[]} */ [input], /** @type {Options} */ options) => {
+        checkLocalInput(input);
         log('info', 'create-trimap');
         const token = await getAccessToken();
         const urlOrId = await ensureUrlOrId(input, token);
@@ -282,7 +203,12 @@ const commands = {
         });
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'model-crop': async (input, options = {}) => {
+    'model-crop': async (/** @type {string[]} */ [input], /** @type {Options} */ options) => {
+        if (options.top == null && options.bottom == null) throw fail('model-crop requires at least one of --top or --bottom');
+        for (const [flag, value] of [['--top', options.top], ['--bottom', options.bottom]]) {
+            if (value != null && !CROP_LOCATIONS.includes(value)) throw fail(`${flag} must be one of: ${CROP_LOCATIONS.join(', ')}`);
+        }
+        checkLocalInput(input);
         log('info', 'model-crop');
         const token = await getAccessToken();
         const urlOrId = await ensureUrlOrId(input, token);
@@ -297,7 +223,7 @@ const commands = {
         });
         console.log(JSON.stringify(res.data, null, 2));
     },
-    'status': async (jobId) => {
+    'status': async (/** @type {string[]} */ [jobId]) => {
         validateId(jobId, 'jobId');
         log('info', 'status', { jobId });
         const token = await getAccessToken();
@@ -316,92 +242,40 @@ const commands = {
     }
 };
 
-const [cmd, ...args] = process.argv.slice(2);
+// --- Command-line flag definitions (the parser itself is in shared/node/pixelz-cli.js) ---------
 
-// The flags each command accepts, mirroring the Python CLI's argparse definitions. Anything else
-// is rejected: an unknown flag (e.g. the typo --feathr) used to be dropped silently.
-const ALLOWED_FLAGS = {
-    'remove-bg': ['color', 'transparent', 'feather', 'trimap', 'callback', 'sync'],
-    'color-match': ['callback', 'sync'],
-    'create-mask': ['feather', 'trimap', 'callback', 'sync'],
-    'create-trimap': ['callback', 'sync'],
-    'model-crop': ['top', 'bottom', 'callback', 'sync'],
-    'status': [], 'get-key': [],
+const SYNC_AND_CALLBACK = { ...flag('string', 'callback'), ...flag('bool', 'sync') };
+
+/** @type {Record<string, import('../../../shared/node/pixelz-cli.js').CommandSpec>} */
+const SPECS = {
+    'remove-bg': {
+        positionals: ['input'],
+        flags: {
+            ...flag('string', 'color'), ...flag('true-false', 'transparent'), ...flag('float', 'feather'),
+            ...flag('string', 'trimap'), ...SYNC_AND_CALLBACK,
+        },
+    },
+    'color-match': { positionals: ['input', 'markers'], flags: SYNC_AND_CALLBACK },
+    'create-mask': {
+        positionals: ['input'],
+        flags: { ...flag('float', 'feather'), ...flag('string', 'trimap'), ...SYNC_AND_CALLBACK },
+    },
+    'create-trimap': { positionals: ['input'], flags: SYNC_AND_CALLBACK },
+    'model-crop': {
+        positionals: ['input'],
+        flags: { ...flag('string', 'top'), ...flag('string', 'bottom'), ...SYNC_AND_CALLBACK },
+    },
+    'status': { positionals: ['job_id'], flags: {} },
+    'get-key': { positionals: [], flags: {} },
 };
-// Flags that take no value, so `--sync <positional>` must not swallow the positional.
-const BOOLEAN_FLAGS = new Set(['sync']);
 
-function parseArgs(rawArgs) {
-    const options = {};
-    const filteredArgs = [];
-    let i = 0;
-    while (i < rawArgs.length) {
-        if (rawArgs[i].startsWith('--')) {
-            const arg = rawArgs[i].slice(2);
-            if (arg.includes('=')) {
-                const eqIdx = arg.indexOf('=');
-                const key = arg.slice(0, eqIdx);
-                const val = arg.slice(eqIdx + 1);
-                options[key] = val === 'true' ? true : val === 'false' ? false : val;
-            } else if (i + 1 < rawArgs.length && !rawArgs[i + 1].startsWith('--')
-                && !(BOOLEAN_FLAGS.has(arg) && !['true', 'false'].includes(rawArgs[i + 1]))) {
-                const val = rawArgs[i + 1];
-                options[arg] = val === 'true' ? true : val === 'false' ? false : val;
-                i++;
-            } else {
-                options[arg] = true;
-            }
-        } else {
-            filteredArgs.push(rawArgs[i]);
-        }
-        i++;
-    }
-    return { filteredArgs, options };
-}
-
-if (commands[cmd]) {
-    const { filteredArgs, options } = parseArgs(args);
-    (async () => {
-        try {
-            const unknown = Object.keys(options).filter(k => !ALLOWED_FLAGS[cmd].includes(k));
-            if (unknown.length) {
-                throw new Error(`[VALIDATION_ERROR] unknown option(s) for ${cmd}: ${unknown.map(k => '--' + k).join(', ')}`);
-            }
-            if (cmd === 'color-match') {
-                await commands['color-match'](filteredArgs[0], filteredArgs[1], options);
-            } else if (cmd === 'status' || cmd === 'get-key') {
-                await commands[cmd](...filteredArgs);
-            } else {
-                await commands[cmd](filteredArgs[0], options);
-            }
-        } catch (err) {
-            let msg;
-            if (err.response) {
-                const { status, data } = err.response;
-                msg = `[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data, null, 2) : data}`;
-            } else if (err.code === 'ECONNABORTED') {
-                msg = '[TIMEOUT] Request timed out';
-            } else if (err.network) {
-                msg = `[NETWORK_ERROR] ${err.message}`;
-            } else {
-                // Messages raised with their own category (e.g. [AUTH_ERROR]) keep it as-is.
-                msg = /^\[[A-Z0-9_]+\]/.test(err.message) ? err.message : `[API_ERROR] ${err.message}`;
-            }
-            msg = redactSecrets(msg);
-            // Same failure line the Python CLI and the MCP servers write; log() redacts as well.
-            log('error', `${cmd} failed`, { error: msg });
-            console.error(msg);
-            process.exit(1);
-        }
-    })();
-} else {
-    console.log(`Pixelz Automation CLI
+const USAGE = `Pixelz Automation CLI
 
 Usage: node cli.js <command> <path|url> [args] [--options]
 
 Commands:
-  remove-bg <path|url> [--color X] [--transparent] [--feather N] [--trimap URL] [--callback URL] [--sync]
-      AI-powered background removal
+  remove-bg <path|url> [--color X] [--transparent true|false] [--feather N] [--trimap URL] [--callback URL] [--sync]
+      AI-powered background removal (--color #RRGGBB or --transparent true, not both)
 
   color-match <path|url> <markersJSON> [--callback URL] [--sync]
       AI-powered color correction
@@ -413,7 +287,7 @@ Commands:
       Generate trimap for complex edges
 
   model-crop <path|url> [--top LOCATION] [--bottom LOCATION] [--callback URL] [--sync]
-      Crop model photo using anatomical landmarks
+      Crop model photo using anatomical landmarks (at least one of --top / --bottom)
 
   status <jobId>
       Poll async job status
@@ -421,5 +295,30 @@ Commands:
   get-key
       Get webhook verification public key
 
-Options use --key=value or --key value syntax.`);
-}
+Options use --key=value or --key value syntax. A flag that takes a value must be given one;
+--sync takes none.`;
+
+runCli({
+    usage: USAGE,
+    specs: SPECS,
+    commands,
+    onError(err, cmd) {
+        let msg;
+        if (err.response) {
+            const { status, data } = err.response;
+            msg = `[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data, null, 2) : data}`;
+        } else if (err.code === 'ECONNABORTED') {
+            msg = '[TIMEOUT] Request timed out';
+        } else if (err.network) {
+            msg = `[NETWORK_ERROR] ${err.message}`;
+        } else {
+            // Messages raised with their own category (e.g. [AUTH_ERROR]) keep it as-is.
+            msg = /^\[[A-Z0-9_]+\]/.test(err.message) ? err.message : `[API_ERROR] ${err.message}`;
+        }
+        msg = redactSecrets(msg);
+        // Same failure line the Python CLI and the MCP servers write; log() redacts as well.
+        log('error', `${cmd} failed`, { error: msg });
+        console.error(msg);
+        process.exit(1);
+    },
+});

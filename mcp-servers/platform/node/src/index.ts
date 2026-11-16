@@ -2,147 +2,25 @@ import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
 import type { jsonSchemaValidator, JsonSchemaValidatorResult } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from 'url';
 import { z } from "zod";
+import { UploadFile, validateId, loadEnv, createRedactor, createLogger, createHttp, resolveLocalFile, readPackageVersion, isUrl,
+    resolveStatus, checkApiError, parsePlatformPresign, PLATFORM_UPLOAD_EXTENSIONS, HEX_COLOR } from '../../../../shared/node/pixelz-common.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Node's built-in .env loader (stable since 22.21). Like dotenv it never overrides variables
-// that are already set, and unlike dotenv it prints nothing to stdout (which carries JSON).
-// A missing file is fine: the credentials may come from the environment instead.
-const ENV_FILE = process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env');
-if (fs.statSync(ENV_FILE, { throwIfNoEntry: false })?.isFile()) process.loadEnvFile(ENV_FILE);
+loadEnv(path.resolve(__dirname, '../../../../.env'));
+
+const readRepoVersion = (): string => readPackageVersion(path.resolve(__dirname, '../../../../package.json'));
 
 const BASE_URL = 'https://api.pixelz.com/REST.svc/JSON';
 const REQUEST_TIMEOUT = 90000;
-const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
-const MAX_RETRIES = 3;
-const RETRY_STATUS = new Set([429, 502, 503, 504]);
-// Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
-// it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
-const RETRY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
 
-// Socket-level failures worth another attempt on an idempotent request. undici (behind fetch)
-// reports a peer that closed the connection as UND_ERR_SOCKET and a stalled connect as
-// UND_ERR_CONNECT_TIMEOUT, where axios used ECONNRESET / ETIMEDOUT.
-const RETRY_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
-const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
-// Same ceiling as the Python sibling's Retry(retry_after_max=...): a huge Retry-After must not
-// park a CLI run or an MCP tool call for hours.
-const RETRY_AFTER_MAX_SECONDS = 60;
-
-// HTTP via Node's built-in fetch, shaped like the slice of axios this file used to rely on:
-// JSON in/out, a timeout, errors carrying .response / .code, and retries.
-class UploadFile {
-    constructor(readonly path: string) {}
-}
-
-type RequestOptions = { params?: Record<string, any>; body?: any; headers?: Record<string, string>; timeout?: number };
-
-/** The OS error code behind a failed fetch, e.g. ECONNREFUSED; ECONNABORTED for our timeout. */
-function networkCode(err: any): string | undefined {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') return 'ECONNABORTED';
-    // fetch reports socket failures as TypeError('fetch failed') with the code on .cause, or on
-    // .cause.errors[] when every address refused (seen on Windows for ECONNREFUSED).
-    return err.cause?.code ?? err.cause?.errors?.find((e: any) => e.code)?.code;
-}
-
-async function backoff(attempt: number, retryAfter: string | null) {
-    // Retry-After may be empty or an HTTP-date rather than seconds; those fall back to backoff.
-    const secs = retryAfter == null || retryAfter.trim() === '' ? NaN : Number(retryAfter);
-    const delay = Number.isFinite(secs)
-        ? Math.min(Math.max(secs, 0), RETRY_AFTER_MAX_SECONDS) * 1000
-        : Math.min(1000 * 2 ** attempt, 30000);
-    await new Promise(r => setTimeout(r, delay));
-}
-
-async function request(method: string, url: string, { params, body, headers = {}, timeout = REQUEST_TIMEOUT }: RequestOptions = {}): Promise<{ status: number; data: any }> {
-    if (params) url += (url.includes('?') ? '&' : '?') + new URLSearchParams(filterNullParams(params));
-    for (let attempt = 0; ; attempt++) {
-        const retryable = RETRY_METHODS.has(method) && attempt < MAX_RETRIES;
-        const h: Record<string, string> = { ...headers };
-        let payload: any = body;
-        if (body instanceof UploadFile) {
-            // A Blob backed by the file: streamed from disk with the Content-Length S3 requires (a
-            // stream body would go out chunked), and safe to send again on a retry.
-            payload = await fs.openAsBlob(body.path);
-        } else if (body !== undefined && !(body instanceof URLSearchParams)) {
-            payload = JSON.stringify(body);
-            h['Content-Type'] = h['Content-Type'] || 'application/json';
-        }
-        let res: Response, text: string;
-        try {
-            res = await fetch(url, { method, headers: h, body: payload, signal: AbortSignal.timeout(timeout) });
-            // Inside the try and under the same signal: a stall mid-body is a timeout too.
-            text = await res.text();
-        } catch (e: any) {
-            const code = networkCode(e);
-            if (retryable && code && RETRY_CODES.has(code)) { await backoff(attempt, null); continue; }
-            const timedOut = !!code && TIMEOUT_CODES.has(code);
-            // Deliberately no URL in the message: Platform credentials travel in the query string.
-            throw Object.assign(new Error(code ? `${e.message} (${code})` : e.message),
-                { code: timedOut ? 'ECONNABORTED' : code, network: !timedOut && code !== 'ERR_INVALID_URL' });
-        }
-        let data: any = text, isJson = true;
-        try { data = text ? JSON.parse(text) : ''; } catch { isJson = false; }
-        if (res.ok) {
-            // A 2xx that is not JSON is a proxy or login page, not an API answer (Python fails too).
-            if (!isJson) throw new Error(`[API_ERROR] Expected a JSON response (HTTP ${res.status}), got: ${redactSecrets(text).slice(0, 100)}`);
-            return { status: res.status, data };
-        }
-        if (retryable && RETRY_STATUS.has(res.status)) {
-            await backoff(attempt, res.headers.get('retry-after'));
-            continue;
-        }
-        throw Object.assign(new Error(`Request failed with status code ${res.status}`), { response: { status: res.status, data } });
-    }
-}
-
-function filterNullParams(obj: Record<string, any>): Record<string, string> {
-    return Object.fromEntries(Object.entries(obj).filter(([_, v]) => v != null).map(([k, v]) => [k, String(v)]));
-}
-
-const http = {
-    get: (url: string, opts: RequestOptions = {}) => request('GET', url, opts),
-    post: (url: string, body: any, opts: RequestOptions = {}) => request('POST', url, { ...opts, body }),
-    put: (url: string, body: any, opts: RequestOptions = {}) => request('PUT', url, { ...opts, body }),
-    delete: (url: string, opts: RequestOptions = {}) => request('DELETE', url, opts),
-};
-
-// fetch's timeout covers the whole request, where axios's was socket inactivity, so an upload's
-// limit must include the transfer itself. 32 KB/s (~256 kbit/s) keeps slow uplinks working.
-const uploadTimeout = (size: number) => REQUEST_TIMEOUT + Math.ceil(size / (32 * 1024)) * 1000;
-
-function redactSecrets(text: string): string {
-    let s = text;
-    for (const key of ['PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL']) {
-        const val = process.env[key];
-        if (!val) continue;
-        // Match raw AND percent-encoded forms: a credential echoed back inside a URL
-        // appears encoded, where a literal match would silently miss it.
-        // URLSearchParams (our query strings) encodes !'()~ and spaces differently from encodeURIComponent.
-        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val), new URLSearchParams({ v: val }).toString().slice(2)])) {
-            s = s.replaceAll(variant, '<REDACTED>');
-        }
-    }
-    // Backstop by param name, so an encoding the variants above miss still cannot leak.
-    s = s.replace(/(contactAPIkey|contactEmail)=[^&\s'"]*/gi, '$1=<REDACTED>');
-    return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
-}
-
-const logFile = process.env.PIXELZ_LOG_FILE;
-function log(level: string, message: string, data?: any) {
-    if (!logFile) return;
-    const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    // Redacted here, not at call sites: error text can carry a credentialed request URL.
-    fs.appendFile(logFile, redactSecrets(entry), (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
-}
-
-function validateId(value: string, name: string) {
-    if (!/^[a-zA-Z0-9_\-]+$/.test(value)) {
-        throw new Error(`Invalid ${name}: contains unexpected characters`);
-    }
-}
+const redactSecrets = createRedactor({
+    envKeys: ['PIXELZ_PLATFORM_API_KEY', 'PIXELZ_PLATFORM_EMAIL'],
+    paramNames: ['contactAPIkey', 'contactEmail'],
+});
+const log = createLogger(redactSecrets);
+const { http, uploadTimeout } = createHttp({ timeout: REQUEST_TIMEOUT, redactSecrets });
 
 const getAuthParams = () => {
     const email = process.env.PIXELZ_PLATFORM_EMAIL;
@@ -153,66 +31,42 @@ const getAuthParams = () => {
     return { contactEmail: email, contactAPIkey: apiKey };
 };
 
-function checkApiError(data: any) {
-    if (data && typeof data === 'object' && !Array.isArray(data)) {
-        const code = data.ErrorCode;
-        if (code !== undefined && code !== 'NoError' && code !== 0) {
-            throw new Error(`[API_ERROR] ${code}: ${data.Message || ''}`);
-        }
-    }
-}
-
 async function ensureUrl(input: string) {
     if (!input) return null;
-    if (input.startsWith('http://') || input.startsWith('https://')) return input;
-    if (!fs.existsSync(input)) throw new Error(`Local file not found: ${input}`);
-    const resolved = fs.realpathSync(input);
-    if (!fs.statSync(resolved).isFile()) throw new Error(`Not a regular file: ${input}`);
-    const fileSize = fs.statSync(resolved).size;
-    if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
+    if (isUrl(input)) return input;
+    const { resolved, fileSize } = resolveLocalFile(input, PLATFORM_UPLOAD_EXTENSIONS);
     const auth = getAuthParams();
     const fileName = path.basename(resolved);
     log('info', 'Requesting presigned URL', { fileName });
     const presignRes = await http.post(`${BASE_URL}/RequestPresignUrls`, { ...auth, imageNames: [fileName] }, { timeout: REQUEST_TIMEOUT });
-    const presignData = presignRes.data;
-    // Documented shape is {ErrorCode: "NoError", Message: "", PostingUrls: [...]}. ErrorCode is
-    // always present, so only a value other than NoError is a failure.
-    const code = Array.isArray(presignData) ? undefined : presignData?.ErrorCode;
-    if (code != null && code !== 'NoError' && code !== 0) {
-        if (code === 'InvalidCustomerInformation') {
-            throw new Error(`[AUTH_ERROR] Platform API rejected the credentials: ${presignData.Message || ''}`);
-        }
-        throw new Error(
-            `[PRESIGN_UNAVAILABLE] ${code}: ${presignData.Message || 'Presigned URL request failed'}. ` +
-            'The account may not be enabled for direct file uploads. ' +
-            'Provide a publicly accessible image URL instead of a local file path.'
-        );
-    }
-    // A bare array is still accepted, as this code originally assumed that shape.
-    const postingUrls = Array.isArray(presignData) ? presignData : presignData?.PostingUrls;
-    if (!Array.isArray(postingUrls) || postingUrls.length === 0) {
-        throw new Error('Presigned URL request returned an unexpected response.');
-    }
-    const { UploadUrl, DownloadUrl } = postingUrls[0];
+    const { UploadUrl, DownloadUrl } = parsePlatformPresign(presignRes.data);
     log('info', 'Uploading file to S3', { fileName, size: fileSize });
     await http.put(UploadUrl, new UploadFile(resolved), { headers: { 'Content-Type': 'application/octet-stream' }, timeout: uploadTimeout(fileSize) });
     return DownloadUrl;
 }
 
+// MCP tool annotations (hints for clients deciding whether to ask the user before a call).
+const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
+const CREATES_ORDER = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, openWorldHint: true } as const;
+
 const TOOLS = [
             {
                 name: "list_templates",
                 description: "List all retouching specification templates available in the Pixelz account. Call this first to discover the templateId required for upload_image.",
+                annotations: READ_ONLY,
                 inputSchema: { type: "object", properties: {} }
             },
             {
                 name: "get_template_detail",
                 description: "Get the full technical configuration of a specific Pixelz template, including output format, background type, margins, alignment, and price per image.",
+                annotations: READ_ONLY,
                 inputSchema: { type: "object", properties: { templateId: { type: "string", description: "Numeric template ID from list_templates" } }, required: ["templateId"] }
             },
             {
                 name: "upload_image",
-                description: "Submit an image for professional manual retouching on the Pixelz Platform. Accepts a local file path or public URL — local files are uploaded to S3 automatically. Returns an ImageTicket GUID; use get_image_status to track progress.",
+                description: "Submit an image for professional manual retouching on the Pixelz Platform. Creates a billable retouching order. Accepts a local file path (images only) or public URL — local files are uploaded to S3 automatically. Returns an ImageTicket GUID; use get_image_status to track progress.",
+                annotations: CREATES_ORDER,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -229,7 +83,7 @@ const TOOLS = [
                         comment: { type: "string", description: "Instructions for the retouching expert" },
                         markupImageUrl: { type: "string" },
                         swatchImageURL: { type: "string" },
-                        swatchColorCode: { type: "string", pattern: "^#[0-9A-Fa-f]{6}$", description: "Hex color like #FFFFFF" },
+                        swatchColorCode: { type: "string", pattern: HEX_COLOR.source, description: "Hex color like #FFFFFF" },
                         markerX: { type: "integer" }, markerY: { type: "integer" },
                         outputFileName: { type: "string" },
                         customerImageColorID: { type: "string" },
@@ -240,7 +94,8 @@ const TOOLS = [
             },
             {
                 name: "white_glove_service",
-                description: "Submit an image for retouching when you don't know which template to use. A Pixelz specialist manually reviews and selects the best settings. Accepts local file path or public URL.",
+                description: "Submit an image for retouching when you don't know which template to use. A Pixelz specialist manually reviews and selects the best settings. Creates a billable retouching order. Accepts local file path or public URL.",
+                annotations: CREATES_ORDER,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -260,7 +115,8 @@ const TOOLS = [
             },
             {
                 name: "stack_image",
-                description: "Submit one part of a multi-image stack (e.g. different angles of the same product). All parts must share the same productId and be submitted within 5 minutes of each other.",
+                description: "Submit one part of a multi-image stack (e.g. different angles of the same product). All parts must share the same productId and be submitted within 5 minutes of each other. Creates a billable retouching order.",
+                annotations: CREATES_ORDER,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -277,7 +133,8 @@ const TOOLS = [
             },
             {
                 name: "get_image_status",
-                description: "Get the processing status of an uploaded image. Status codes: 10=New, 60=In Production, 70=Production Finished (QC), 80=Delivered. When status is 80 the FinalImagesURL is ready for download.",
+                description: "Get the processing status of an uploaded image. Codes: 10 new, 12 download failed, 20 awaiting payment (deprecated), 30 ready for production, 40 returned for production, 60 in production, 62 assigned to editor, 64 downloaded by editor, 66 quality assurance, 70 finished (ready for download), 72/74/76 delivery attempt 1/2/3 failed, 78 delivery failed, 80 delivered, 90 rejected by Pixelz, 95 awaiting your reply, 100 closed, 0 deleted by user, 999 deleted by cleanup. 12, 90 and 95 need user action: tell the user, do not retry. A non-empty FinalImagesURL means a result is downloadable.",
+                annotations: READ_ONLY,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -289,11 +146,12 @@ const TOOLS = [
             },
             {
                 name: "list_images",
-                description: "Search and list images in the account with optional filters. Returns ticket IDs, statuses, and dates. Status accepts codes or names: 10/new, 60/in production, 70/production finished, 80/delivered.",
+                description: "Search and list images in the account with optional filters. Returns ticket IDs, statuses, and dates. Status accepts any numeric code (see get_image_status); only new/in production/production finished/delivered are aliases for 10/60/70/80.",
+                annotations: READ_ONLY,
                 inputSchema: {
                     type: "object",
                     properties: {
-                        imageStatus: { type: "string", description: "Filter by status code or name (10/new, 60/in production, 70/production finished, 80/delivered)" },
+                        imageStatus: { type: "string", description: "Filter by numeric status code, or alias: new, in production, production finished, delivered" },
                         excludeImageStatus: { type: "string", description: "Exclude by status code or name" },
                         productId: { type: "string" },
                         fromDate: { type: "string", description: "YYYY-MM-DD" },
@@ -307,11 +165,12 @@ const TOOLS = [
             },
             {
                 name: "count_images",
-                description: "Get a count of images matching the given filters. Faster than list_images when you only need a total number.",
+                description: "Get a count of images matching the given filters. Faster than list_images when you only need a total number. Status accepts any numeric code (see get_image_status); only new/in production/production finished/delivered are aliases for 10/60/70/80.",
+                annotations: READ_ONLY,
                 inputSchema: {
                     type: "object",
                     properties: {
-                        imageStatus: { type: "string", description: "Filter by status code or name (10/new, 60/in production, 70/production finished, 80/delivered)" },
+                        imageStatus: { type: "string", description: "Filter by numeric status code, or alias: new, in production, production finished, delivered" },
                         fromDate: { type: "string", description: "YYYY-MM-DD" },
                         toDate: { type: "string", description: "YYYY-MM-DD" }
                     }
@@ -320,11 +179,13 @@ const TOOLS = [
             {
                 name: "list_product_ids",
                 description: "List product IDs with completion statistics (TodoCount vs DoneCount). Useful for tracking whether an entire product batch has been fully retouched.",
+                annotations: READ_ONLY,
                 inputSchema: { type: "object", properties: { page: { type: "number" }, perPage: { type: "number" } } }
             },
             {
                 name: "delete_image",
                 description: "Cancel and delete an image processing request. Only possible before the image enters production (status < 60). Confirm the ticket with the user before calling.",
+                annotations: DESTRUCTIVE,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -337,6 +198,7 @@ const TOOLS = [
             {
                 name: "reject_image",
                 description: "Request a correction (redo) for a delivered image. Only valid when status is 80 (Delivered). The image re-enters the production queue at no extra charge.",
+                annotations: CREATES_ORDER,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -351,11 +213,13 @@ const TOOLS = [
             {
                 name: "get_contact",
                 description: "Retrieve account profile information including company details and current credit balance (ContactAccountBalance and Currency).",
+                annotations: READ_ONLY,
                 inputSchema: { type: "object", properties: {} }
             },
             {
                 name: "get_invoices",
                 description: "Retrieve billing statements. Returns invoice amounts, dates, and payment URLs.",
+                annotations: READ_ONLY,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -369,6 +233,7 @@ const TOOLS = [
             {
                 name: "add_color_library",
                 description: "Register color reference images (swatches) for use with color matching. Returns colorwayIds that can be passed to upload_image. Accepts local file paths or public URLs — local files are uploaded to S3 automatically.",
+                annotations: CREATES_ORDER,
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -378,15 +243,6 @@ const TOOLS = [
                 }
             },
 ] as const;
-
-// --- Status aliases (human-readable names → API numeric codes) ---
-const STATUS_ALIASES: Record<string, string> = {
-    'new': '10', 'in production': '60', 'production finished': '70', 'delivered': '80'
-};
-function resolveStatus(value: string | undefined): string | undefined {
-    if (!value) return value;
-    return STATUS_ALIASES[value.toLowerCase()] || value;
-}
 
 // --- Zod validation schemas ---
 const TemplateIdSchema = z.object({ templateId: z.string().min(1) });
@@ -405,7 +261,7 @@ const UploadImageSchema = z.object({
     comment: z.string().optional(),
     markupImageUrl: z.string().optional(),
     swatchImageURL: z.string().optional(),
-    swatchColorCode: z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a hex color like #FFFFFF').optional(),
+    swatchColorCode: z.string().regex(HEX_COLOR, 'Must be a hex color like #FFFFFF').optional(),
     markerX: z.number().int().optional(), markerY: z.number().int().optional(),
     outputFileName: z.string().optional(),
     customerImageColorID: z.string().optional(),
@@ -481,13 +337,23 @@ const GetInvoicesSchema = z.object({
     returnUrl: z.string().optional(),
 });
 
+// Identifiers only: comments, callback URLs and local paths in the arguments stay out of the log file.
+function loggableArgs(args: any) {
+    const out: Record<string, string | number> = {};
+    for (const key of ['templateId', 'imageTicket'] as const) {
+        if (typeof args?.[key] === 'string') out[key] = args[key];
+    }
+    if (Array.isArray(args?.imagesPath)) out.count = args.imagesPath.length;
+    return Object.keys(out).length ? out : undefined;
+}
+
 async function callTool(name: string, args: any) {
     try {
         // Inside the try: getAuthParams() throws when credentials are missing, and callers
         // are promised a structured [AUTH_ERROR] result rather than a protocol-level throw.
         const auth = getAuthParams();
         let response;
-        log('info', `Tool called: ${name}`, args);
+        log('info', `Tool called: ${name}`, loggableArgs(args));
         switch (name) {
             case "list_templates":
                 response = await http.get(`${BASE_URL}/Templates`, { params: auth, timeout: REQUEST_TIMEOUT });
@@ -552,7 +418,10 @@ async function callTool(name: string, args: any) {
             case "reject_image": {
                 const p = RejectImageSchema.parse(args);
                 validateId(p.imageTicket, 'imageTicket');
-                response = await http.put(`${BASE_URL}/Image/Reject/${p.imageTicket}`, { ...auth, ...p }, { timeout: REQUEST_TIMEOUT });
+                // The documented REJECT payload repeats imageTicket alongside the path segment.
+                response = await http.put(`${BASE_URL}/Image/Reject/${p.imageTicket}`,
+                    { ...auth, imageTicket: p.imageTicket, comment: p.comment, markupImageUrl: p.markupImageUrl, customerImageId: p.customerImageId },
+                    { timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "get_contact":
@@ -585,7 +454,7 @@ async function callTool(name: string, args: any) {
             const data = error.response.data;
             errorMsg = `[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data) : data}`;
         } else if (error.code === 'ECONNABORTED') {
-            errorMsg = `[TIMEOUT] Request timed out after ${REQUEST_TIMEOUT / 1000} seconds`;
+            errorMsg = `[TIMEOUT] Request timed out after ${(error.timeoutMs ?? REQUEST_TIMEOUT) / 1000} seconds`;
         } else if (error.network) {
             errorMsg = `[NETWORK_ERROR] ${error.message}`;
         } else {
@@ -610,7 +479,7 @@ const passThroughValidator: jsonSchemaValidator = {
 // One factory call per connection; serveStdio pins the instance for its lifetime.
 function buildServer() {
     const server = new McpServer(
-        { name: "pixelz-platform-mcp", version: "2.0.0" },
+        { name: "pixelz-platform-mcp", version: readRepoVersion() },
         {
             capabilities: { tools: {} },
             // The tool list is a static array — a real TTL lets clients skip re-fetching
@@ -622,14 +491,14 @@ function buildServer() {
     for (const tool of TOOLS) {
         server.registerTool(
             tool.name,
-            { description: tool.description, inputSchema: fromJsonSchema(tool.inputSchema, passThroughValidator) },
+            { description: tool.description, annotations: tool.annotations, inputSchema: fromJsonSchema(tool.inputSchema, passThroughValidator) },
             async (args: any) => callTool(tool.name, args) as any
         );
     }
     return server;
 }
 
-export { buildServer, callTool, TOOLS, getAuthParams, checkApiError, ensureUrl, validateId, redactSecrets,
+export { buildServer, callTool, TOOLS, readRepoVersion, getAuthParams, checkApiError, ensureUrl, validateId, redactSecrets,
     AddColorLibrarySchema, UploadImageSchema, RejectImageSchema, ListImagesSchema };
 
 if (process.env.NODE_ENV !== 'test') {

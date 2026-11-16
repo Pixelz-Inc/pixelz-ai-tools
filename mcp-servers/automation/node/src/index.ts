@@ -2,148 +2,25 @@ import { McpServer, fromJsonSchema } from "@modelcontextprotocol/server";
 import type { jsonSchemaValidator, JsonSchemaValidatorResult } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from 'url';
 import { z } from "zod";
+import { UploadFile, validateId, loadEnv, createRedactor, createLogger, createHttp, resolveLocalFile, readPackageVersion, isUrl, AUTOMATION_MIME_TYPES, AUTOMATION_UPLOAD_EXTENSIONS, HEX_COLOR, CROP_LOCATIONS, UPLOAD_UNAVAILABLE } from '../../../../shared/node/pixelz-common.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Node's built-in .env loader (stable since 22.21). Like dotenv it never overrides variables
-// that are already set, and unlike dotenv it prints nothing to stdout (which carries JSON).
-// A missing file is fine: the credentials may come from the environment instead.
-const ENV_FILE = process.env.PIXELZ_DOTENV_PATH || path.resolve(__dirname, '../../../../.env');
-if (fs.statSync(ENV_FILE, { throwIfNoEntry: false })?.isFile()) process.loadEnvFile(ENV_FILE);
+loadEnv(path.resolve(__dirname, '../../../../.env'));
+
+const readRepoVersion = (): string => readPackageVersion(path.resolve(__dirname, '../../../../package.json'));
 
 const AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token';
 const BASE_URL = 'https://automation-api.pixelz.com/v1';
 const REQUEST_TIMEOUT = 90000;
-const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB
-const MAX_RETRIES = 3;
-const RETRY_STATUS = new Set([429, 502, 503, 504]);
-// Same methods urllib3 retries by default, so Node matches the Python sibling. POST is excluded:
-// it creates billable jobs, and a 502/504 can arrive after the backend already accepted one.
-const RETRY_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
 
-// Socket-level failures worth another attempt on an idempotent request. undici (behind fetch)
-// reports a peer that closed the connection as UND_ERR_SOCKET and a stalled connect as
-// UND_ERR_CONNECT_TIMEOUT, where axios used ECONNRESET / ETIMEDOUT.
-const RETRY_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
-const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']);
-// Same ceiling as the Python sibling's Retry(retry_after_max=...): a huge Retry-After must not
-// park a CLI run or an MCP tool call for hours.
-const RETRY_AFTER_MAX_SECONDS = 60;
-
-// HTTP via Node's built-in fetch, shaped like the slice of axios this file used to rely on:
-// JSON in/out, a timeout, errors carrying .response / .code, and retries.
-class UploadFile {
-    constructor(readonly path: string) {}
-}
-
-type RequestOptions = { params?: Record<string, any>; body?: any; headers?: Record<string, string>; timeout?: number };
-
-/** The OS error code behind a failed fetch, e.g. ECONNREFUSED; ECONNABORTED for our timeout. */
-function networkCode(err: any): string | undefined {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') return 'ECONNABORTED';
-    // fetch reports socket failures as TypeError('fetch failed') with the code on .cause, or on
-    // .cause.errors[] when every address refused (seen on Windows for ECONNREFUSED).
-    return err.cause?.code ?? err.cause?.errors?.find((e: any) => e.code)?.code;
-}
-
-async function backoff(attempt: number, retryAfter: string | null) {
-    // Retry-After may be empty or an HTTP-date rather than seconds; those fall back to backoff.
-    const secs = retryAfter == null || retryAfter.trim() === '' ? NaN : Number(retryAfter);
-    const delay = Number.isFinite(secs)
-        ? Math.min(Math.max(secs, 0), RETRY_AFTER_MAX_SECONDS) * 1000
-        : Math.min(1000 * 2 ** attempt, 30000);
-    await new Promise(r => setTimeout(r, delay));
-}
-
-async function request(method: string, url: string, { params, body, headers = {}, timeout = REQUEST_TIMEOUT }: RequestOptions = {}): Promise<{ status: number; data: any }> {
-    if (params) url += (url.includes('?') ? '&' : '?') + new URLSearchParams(filterNullParams(params));
-    for (let attempt = 0; ; attempt++) {
-        const retryable = RETRY_METHODS.has(method) && attempt < MAX_RETRIES;
-        const h: Record<string, string> = { ...headers };
-        let payload: any = body;
-        if (body instanceof UploadFile) {
-            // A Blob backed by the file: streamed from disk with the Content-Length S3 requires (a
-            // stream body would go out chunked), and safe to send again on a retry.
-            payload = await fs.openAsBlob(body.path);
-        } else if (body !== undefined && !(body instanceof URLSearchParams)) {
-            payload = JSON.stringify(body);
-            h['Content-Type'] = h['Content-Type'] || 'application/json';
-        }
-        let res: Response, text: string;
-        try {
-            res = await fetch(url, { method, headers: h, body: payload, signal: AbortSignal.timeout(timeout) });
-            // Inside the try and under the same signal: a stall mid-body is a timeout too.
-            text = await res.text();
-        } catch (e: any) {
-            const code = networkCode(e);
-            if (retryable && code && RETRY_CODES.has(code)) { await backoff(attempt, null); continue; }
-            const timedOut = !!code && TIMEOUT_CODES.has(code);
-            // Deliberately no URL in the message: Platform credentials travel in the query string.
-            throw Object.assign(new Error(code ? `${e.message} (${code})` : e.message),
-                { code: timedOut ? 'ECONNABORTED' : code, network: !timedOut && code !== 'ERR_INVALID_URL' });
-        }
-        let data: any = text, isJson = true;
-        try { data = text ? JSON.parse(text) : ''; } catch { isJson = false; }
-        if (res.ok) {
-            // A 2xx that is not JSON is a proxy or login page, not an API answer (Python fails too).
-            if (!isJson) throw new Error(`[API_ERROR] Expected a JSON response (HTTP ${res.status}), got: ${redactSecrets(text).slice(0, 100)}`);
-            return { status: res.status, data };
-        }
-        if (retryable && RETRY_STATUS.has(res.status)) {
-            await backoff(attempt, res.headers.get('retry-after'));
-            continue;
-        }
-        throw Object.assign(new Error(`Request failed with status code ${res.status}`), { response: { status: res.status, data } });
-    }
-}
-
-function filterNullParams(obj: Record<string, any>): Record<string, string> {
-    return Object.fromEntries(Object.entries(obj).filter(([_, v]) => v != null).map(([k, v]) => [k, String(v)]));
-}
-
-const http = {
-    get: (url: string, opts: RequestOptions = {}) => request('GET', url, opts),
-    post: (url: string, body: any, opts: RequestOptions = {}) => request('POST', url, { ...opts, body }),
-    put: (url: string, body: any, opts: RequestOptions = {}) => request('PUT', url, { ...opts, body }),
-    delete: (url: string, opts: RequestOptions = {}) => request('DELETE', url, opts),
-};
-
-// fetch's timeout covers the whole request, where axios's was socket inactivity, so an upload's
-// limit must include the transfer itself. 32 KB/s (~256 kbit/s) keeps slow uplinks working.
-const uploadTimeout = (size: number) => REQUEST_TIMEOUT + Math.ceil(size / (32 * 1024)) * 1000;
-
-function redactSecrets(text: string): string {
-    let s = text;
-    for (const key of ['PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET']) {
-        const val = process.env[key];
-        if (!val) continue;
-        // Match raw AND percent-encoded forms: a credential echoed back inside a URL
-        // appears encoded, where a literal match would silently miss it.
-        // URLSearchParams (our query strings) encodes !'()~ and spaces differently from encodeURIComponent.
-        for (const variant of new Set([val, encodeURIComponent(val), encodeURI(val), new URLSearchParams({ v: val }).toString().slice(2)])) {
-            s = s.replaceAll(variant, '<REDACTED>');
-        }
-    }
-    // Backstop by param name, so an encoding the variants above miss still cannot leak.
-    s = s.replace(/(client_id|client_secret)=[^&\s'"]*/gi, '$1=<REDACTED>');
-    return s.replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '<REDACTED>');
-}
-
-const logFile = process.env.PIXELZ_LOG_FILE;
-function log(level: string, message: string, data?: any) {
-    if (!logFile) return;
-    const entry = `[${new Date().toISOString()}] [${level}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}\n`;
-    // Redacted here, not at call sites: error text can carry a credentialed request URL.
-    fs.appendFile(logFile, redactSecrets(entry), (err) => { if (err) process.stderr.write('Log write failed: ' + err.message + '\n'); });
-}
-
-function validateId(value: string, name: string) {
-    if (!/^[a-zA-Z0-9_\-]+$/.test(value)) {
-        throw new Error(`Invalid ${name}: contains unexpected characters`);
-    }
-}
+const redactSecrets = createRedactor({
+    envKeys: ['PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'],
+    paramNames: ['client_id', 'client_secret'],
+});
+const log = createLogger(redactSecrets);
+const { http, uploadTimeout } = createHttp({ timeout: REQUEST_TIMEOUT, redactSecrets });
 
 const tokenCache = { token: null as string | null, expiresAt: 0 };
 let tokenPromise: Promise<string> | null = null;
@@ -175,33 +52,61 @@ async function getAccessToken() {
     return tokenPromise;
 }
 
-const MIME_TYPES: Record<string, string> = {
-    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.png': 'image/png', '.webp': 'image/webp'
-};
-
 async function ensureUrlOrId(input: string, token: string) {
     if (!input) return null;
-    if (input.startsWith('http://') || input.startsWith('https://')) return input;
-    if (!fs.existsSync(input)) throw new Error(`Local file not found: ${input}`);
-    const resolved = fs.realpathSync(input);
-    if (!fs.statSync(resolved).isFile()) throw new Error(`Not a regular file: ${input}`);
-    const fileSize = fs.statSync(resolved).size;
-    if (fileSize > MAX_FILE_SIZE) throw new Error(`File too large (${(fileSize / (1024 * 1024 * 1024)).toFixed(2)} GB). Maximum allowed size is 2 GB.`);
+    if (isUrl(input)) return input;
+    const { resolved, fileSize } = resolveLocalFile(input, AUTOMATION_UPLOAD_EXTENSIONS);
     const fileName = path.basename(resolved);
     log('info', 'Requesting upload URL', { fileName });
-    const presignRes = await http.post(`${BASE_URL}/files/request-upload-url`, { fileName }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: REQUEST_TIMEOUT });
-    const uploadUrl = presignRes.data.url;
-    const contentType = MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
+    let presignRes;
+    try {
+        presignRes = await http.post(`${BASE_URL}/files/request-upload-url`, { fileName }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: REQUEST_TIMEOUT });
+    } catch (e: any) {
+        if (e.response?.status === 403) {
+            throw new Error(UPLOAD_UNAVAILABLE);
+        }
+        throw e;
+    }
+    const uploadUrl = presignRes.data?.url;
+    if (!uploadUrl) throw new Error('Upload URL request returned an unexpected response.');
+    const contentType = AUTOMATION_MIME_TYPES[path.extname(resolved).toLowerCase()] || 'application/octet-stream';
     log('info', 'Uploading file', { fileName, size: fileSize });
     await http.put(uploadUrl, new UploadFile(resolved), { headers: { 'Content-Type': contentType }, timeout: uploadTimeout(fileSize) });
     return uploadUrl;
 }
 
+// MCP tool annotations (hints for clients deciding whether to ask the user before a call).
+const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
+const CREATES_JOB = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
+
+// Mirrors the OpenAPI ColorMarker/SwatchImage schemas; ColorMarkerSchema below enforces the same rules.
+const COLOR_MARKER_JSON_SCHEMA = {
+    type: "object",
+    properties: {
+        x_coordinate: { type: "integer", description: "Horizontal pixel position of the colour sample in the main image (centre of a 30x30 block; avoid shadows/highlights)." },
+        y_coordinate: { type: "integer", description: "Vertical pixel position of the colour sample in the main image." },
+        swatch_color_code: { type: "string", pattern: HEX_COLOR.source, description: "Target colour as #RRGGBB. Mutually exclusive with swatch_image." },
+        swatch_image: {
+            type: "object",
+            description: "Reference swatch image. Mutually exclusive with swatch_color_code.",
+            properties: {
+                swatch_image_url: { type: "string", description: "Public URL of the swatch image." },
+                x_coordinate: { type: "integer", description: "Horizontal pixel position of the colour sample in the swatch image." },
+                y_coordinate: { type: "integer", description: "Vertical pixel position of the colour sample in the swatch image." }
+            },
+            required: ["swatch_image_url", "x_coordinate", "y_coordinate"],
+            additionalProperties: false
+        }
+    },
+    required: ["x_coordinate", "y_coordinate"],
+    additionalProperties: false
+} as const;
+
 const TOOLS = [
             {
                 name: "remove_background",
-                description: "AI-powered background removal. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0–1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Only set sync=true if the user explicitly requests synchronous processing (risk of timeout).",
+                annotations: CREATES_JOB,
+                description: "AI-powered background removal. Billed: 100 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0–1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Only set sync=true if the user explicitly requests synchronous processing (risk of timeout).",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -218,15 +123,17 @@ const TOOLS = [
             },
             {
                 name: "color_matching",
-                description: "AI-powered color correction. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Only set sync=true if the user explicitly requests it.",
+                annotations: CREATES_JOB,
+                description: "AI-powered color correction. Billed: 100 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Only set sync=true if the user explicitly requests it.",
                 inputSchema: {
                     type: "object",
                     properties: {
                         imagePath: { type: "string", description: "Local file path or public URL" },
                         colorMarkers: {
                             type: "array",
-                            description: "Array of marker objects. Each requires x_coordinate, y_coordinate, and either swatch_color_code (hex) or swatch_image (object with swatch_image_url, x_coordinate, y_coordinate).",
-                            items: { type: "object" }
+                            description: "Array of marker objects. Each requires x_coordinate, y_coordinate, and exactly one of swatch_color_code (hex) or swatch_image (object with swatch_image_url, x_coordinate, y_coordinate).",
+                            minItems: 1,
+                            items: COLOR_MARKER_JSON_SCHEMA
                         },
                         callbackUrl: { type: "string" },
                         sync: { type: "boolean", description: "Run synchronously. Only use if user explicitly requests it." }
@@ -236,7 +143,8 @@ const TOOLS = [
             },
             {
                 name: "create_mask",
-                description: "Generate a greyscale silhouette mask (white=subject, black=background). Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Only set sync=true if the user explicitly requests it.",
+                annotations: CREATES_JOB,
+                description: "Generate a greyscale silhouette mask (white=subject, black=background). Billed: 100 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Only set sync=true if the user explicitly requests it.",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -251,7 +159,8 @@ const TOOLS = [
             },
             {
                 name: "create_trimap",
-                description: "Generate a trimap for complex subjects (hair, fur, transparent edges). Default: async — returns job_id. Pass result trimapUrl to remove_background or create_mask for higher quality edges. Only set sync=true if the user explicitly requests it.",
+                annotations: CREATES_JOB,
+                description: "Generate a trimap for complex subjects (hair, fur, transparent edges). Billed: 50 tokens per job. Default: async — returns job_id. Pass result trimapUrl to remove_background or create_mask for higher quality edges. Only set sync=true if the user explicitly requests it.",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -264,13 +173,14 @@ const TOOLS = [
             },
             {
                 name: "model_crop",
-                description: "Crop a model photograph using anatomical landmarks. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Only set sync=true if the user explicitly requests it.",
+                annotations: CREATES_JOB,
+                description: `Crop a model photograph using anatomical landmarks. At least one of topCropLocation / bottomCropLocation is required. Billed: 10 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30–60 seconds; call get_job_status once to check, never in a loop. Locations: ${CROP_LOCATIONS.join(', ')}. Only set sync=true if the user explicitly requests it.`,
                 inputSchema: {
                     type: "object",
                     properties: {
                         imagePath: { type: "string", description: "Local file path or public URL" },
-                        topCropLocation: { type: "string", enum: ["eye_higher", "below_eye", "btw_eye_and_nose", "below_nose", "between_nose_and_mouth", "below_mouth", "below_chin", "chest", "at_elbow_higher", "at_elbow_lower", "waist", "below_buttock", "main_body_axis", "mid_thigh", "above_knee", "at_knee", "below_knee"] },
-                        bottomCropLocation: { type: "string", enum: ["eye_higher", "below_eye", "btw_eye_and_nose", "below_nose", "between_nose_and_mouth", "below_mouth", "below_chin", "chest", "at_elbow_higher", "at_elbow_lower", "waist", "below_buttock", "main_body_axis", "mid_thigh", "above_knee", "at_knee", "below_knee"] },
+                        topCropLocation: { type: "string", enum: CROP_LOCATIONS },
+                        bottomCropLocation: { type: "string", enum: CROP_LOCATIONS },
                         callbackUrl: { type: "string" },
                         sync: { type: "boolean", description: "Run synchronously. Only use if user explicitly requests it." }
                     },
@@ -279,25 +189,22 @@ const TOOLS = [
             },
             {
                 name: "get_job_status",
-                description: "Check the status of any async Automation job. Most jobs finish in 30–60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. Read status.status_name: Created/ReadyForProcess/Processing = still working, report status and check again later; Completed or Delivered = result.result_image_url is ready; Failed = report the error to the user and ask whether to resubmit.",
+                annotations: READ_ONLY,
+                description: "Check the status of any async Automation job (free). Most jobs finish in 30–60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. Read status.status_name: Created/ReadyForProcess/Processing = still working, report status and check again later; Completed or Delivered = result.result_image_url is ready; Failed = report the error to the user and ask whether to resubmit.",
                 inputSchema: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"] }
             },
             {
                 name: "get_webhook_public_key",
+                annotations: READ_ONLY,
                 description: "Retrieve the ECDSA public key used to verify Pixelz Automation webhook payload signatures. Store this key in your application to validate incoming webhook requests.",
                 inputSchema: { type: "object", properties: {} }
             },
 ] as const;
 
 // --- Zod validation schemas ---
-const CROP_LOCATIONS = ["eye_higher", "below_eye", "btw_eye_and_nose", "below_nose",
-    "between_nose_and_mouth", "below_mouth", "below_chin", "chest",
-    "at_elbow_higher", "at_elbow_lower", "waist", "below_buttock",
-    "main_body_axis", "mid_thigh", "above_knee", "at_knee", "below_knee"] as const;
-
 const RemoveBgSchema = z.object({
     imagePath: z.string().min(1),
-    backgroundColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'Must be a hex color like #FFFFFF').optional(),
+    backgroundColor: z.string().regex(HEX_COLOR, 'Must be a hex color like #FFFFFF').optional(),
     transparentBackground: z.boolean().optional(),
     featherWidth: z.number().min(0).optional(),
     trimapUrl: z.string().optional(),
@@ -305,9 +212,24 @@ const RemoveBgSchema = z.object({
     sync: z.boolean().optional(),
 });
 
+const SwatchImageSchema = z.object({
+    swatch_image_url: z.string().min(1),
+    x_coordinate: z.number().int(),
+    y_coordinate: z.number().int(),
+}).strict();
+
+// The API takes exactly one of swatch_color_code / swatch_image per marker (null counts as unset).
+const ColorMarkerSchema = z.object({
+    x_coordinate: z.number().int(),
+    y_coordinate: z.number().int(),
+    swatch_color_code: z.string().regex(HEX_COLOR, 'Must be a hex color like #FFFFFF').nullish(),
+    swatch_image: SwatchImageSchema.nullish(),
+}).strict().refine(m => (m.swatch_color_code != null) !== (m.swatch_image != null),
+    { message: 'exactly one of swatch_color_code or swatch_image is required' });
+
 const ColorMatchingSchema = z.object({
     imagePath: z.string().min(1),
-    colorMarkers: z.array(z.object({}).passthrough()).min(1),
+    colorMarkers: z.array(ColorMarkerSchema).min(1),
     callbackUrl: z.string().optional(),
     sync: z.boolean().optional(),
 });
@@ -336,23 +258,27 @@ const ModelCropSchema = z.object({
 
 const JobIdSchema = z.object({ jobId: z.string().min(1) });
 
+// Identifiers only: callback URLs and local paths in the arguments stay out of the log file.
+function loggableArgs(args: any) {
+    return typeof args?.jobId === 'string' ? { jobId: args.jobId } : undefined;
+}
+
 async function callTool(name: string, args: any) {
     try {
-        // Inside the try: getAccessToken() throws on missing credentials or a failed token
-        // exchange, and callers are promised a structured error result rather than a
-        // protocol-level throw.
-        const token = await getAccessToken();
         let response;
-        log('info', `Tool called: ${name}`, args);
+        log('info', `Tool called: ${name}`, loggableArgs(args));
 
         const filterNull = (obj: Record<string, any>) => Object.fromEntries(Object.entries(obj).filter(([_, v]) => v != null));
 
-        const makeHeaders = (sync: boolean) => {
+        const makeHeaders = (token: string, sync: boolean) => {
             const h: Record<string, string> = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
             if (!sync) h['Respond-Mode'] = 'async';
             return h;
         };
 
+        // Each case validates its arguments first and only then fetches the token (inside the try:
+        // getAccessToken() throws on missing credentials or a failed exchange, and callers are
+        // promised a structured error result), so a bad argument needs no credentials or network.
         switch (name) {
             case "remove_background": {
                 const p = RemoveBgSchema.parse(args);
@@ -361,6 +287,7 @@ async function callTool(name: string, args: any) {
                 const transparent = p.transparentBackground ?? !p.backgroundColor;
                 if (p.backgroundColor && transparent) throw new Error('[VALIDATION_ERROR] backgroundColor and transparentBackground=true cannot be used together');
                 if (!p.backgroundColor && !transparent) throw new Error('[VALIDATION_ERROR] transparentBackground=false requires backgroundColor: set backgroundColor, or leave transparentBackground unset/true');
+                const token = await getAccessToken();
                 const rbUrl = await ensureUrlOrId(p.imagePath, token);
                 response = await http.post(`${BASE_URL}/images/remove-background`, filterNull({
                     image_url: rbUrl,
@@ -369,58 +296,68 @@ async function callTool(name: string, args: any) {
                     feather_width: p.featherWidth,
                     trimap_url: p.trimapUrl,
                     callback_url: p.callbackUrl
-                }), { headers: makeHeaders(p.sync === true), timeout: REQUEST_TIMEOUT });
+                }), { headers: makeHeaders(token, p.sync === true), timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "color_matching": {
                 const p = ColorMatchingSchema.parse(args);
+                const token = await getAccessToken();
                 const cmUrl = await ensureUrlOrId(p.imagePath, token);
                 response = await http.post(`${BASE_URL}/images/color-matching`, filterNull({
                     image_url: cmUrl,
                     color_markers: p.colorMarkers,
                     callback_url: p.callbackUrl
-                }), { headers: makeHeaders(p.sync === true), timeout: REQUEST_TIMEOUT });
+                }), { headers: makeHeaders(token, p.sync === true), timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "create_mask": {
                 const p = CreateMaskSchema.parse(args);
+                const token = await getAccessToken();
                 const mUrl = await ensureUrlOrId(p.imagePath, token);
                 response = await http.post(`${BASE_URL}/images/create-mask`, filterNull({
                     image_url: mUrl,
                     feather_width: p.featherWidth,
                     trimap_url: p.trimapUrl,
                     callback_url: p.callbackUrl
-                }), { headers: makeHeaders(p.sync === true), timeout: REQUEST_TIMEOUT });
+                }), { headers: makeHeaders(token, p.sync === true), timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "create_trimap": {
                 const p = CreateTrimapSchema.parse(args);
+                const token = await getAccessToken();
                 const tUrl = await ensureUrlOrId(p.imagePath, token);
                 response = await http.post(`${BASE_URL}/images/create-trimap`, filterNull({
                     image_url: tUrl,
                     callback_url: p.callbackUrl
-                }), { headers: makeHeaders(p.sync === true), timeout: REQUEST_TIMEOUT });
+                }), { headers: makeHeaders(token, p.sync === true), timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "model_crop": {
                 const p = ModelCropSchema.parse(args);
+                // API rule: at least one of the two locations must be given.
+                if (!p.topCropLocation && !p.bottomCropLocation) {
+                    throw new Error('[VALIDATION_ERROR] at least one of topCropLocation or bottomCropLocation is required');
+                }
+                const token = await getAccessToken();
                 const mcUrl = await ensureUrlOrId(p.imagePath, token);
                 response = await http.post(`${BASE_URL}/images/model-crop`, filterNull({
                     image_url: mcUrl,
                     top_crop_location: p.topCropLocation,
                     bottom_crop_location: p.bottomCropLocation,
                     callback_url: p.callbackUrl
-                }), { headers: makeHeaders(p.sync === true), timeout: REQUEST_TIMEOUT });
+                }), { headers: makeHeaders(token, p.sync === true), timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "get_job_status": {
                 const p = JobIdSchema.parse(args);
                 validateId(p.jobId, 'jobId');
+                const token = await getAccessToken();
                 const h: Record<string, string> = { 'Authorization': `Bearer ${token}` };
                 response = await http.get(`${BASE_URL}/images/jobs/${p.jobId}/status`, { headers: h, timeout: REQUEST_TIMEOUT });
                 break;
             }
             case "get_webhook_public_key": {
+                const token = await getAccessToken();
                 const h: Record<string, string> = { 'Authorization': `Bearer ${token}` };
                 response = await http.get(`${BASE_URL}/webhook/public-keys`, { headers: h, timeout: REQUEST_TIMEOUT });
                 break;
@@ -440,7 +377,7 @@ async function callTool(name: string, args: any) {
             const data = error.response.data;
             errorMsg = `[HTTP_${status}] ${typeof data === 'object' ? JSON.stringify(data) : data}`;
         } else if (error.code === 'ECONNABORTED') {
-            errorMsg = `[TIMEOUT] Request timed out after ${REQUEST_TIMEOUT / 1000} seconds`;
+            errorMsg = `[TIMEOUT] Request timed out after ${(error.timeoutMs ?? REQUEST_TIMEOUT) / 1000} seconds`;
         } else if (error.network) {
             errorMsg = `[NETWORK_ERROR] ${error.message}`;
         } else {
@@ -464,7 +401,7 @@ const passThroughValidator: jsonSchemaValidator = {
 // One factory call per connection; serveStdio pins the instance for its lifetime.
 function buildServer() {
     const server = new McpServer(
-        { name: "pixelz-automation-mcp", version: "2.0.0" },
+        { name: "pixelz-automation-mcp", version: readRepoVersion() },
         {
             capabilities: { tools: {} },
             // The tool list is a static array — a real TTL lets clients skip re-fetching
@@ -476,15 +413,15 @@ function buildServer() {
     for (const tool of TOOLS) {
         server.registerTool(
             tool.name,
-            { description: tool.description, inputSchema: fromJsonSchema(tool.inputSchema, passThroughValidator) },
+            { description: tool.description, annotations: tool.annotations, inputSchema: fromJsonSchema(tool.inputSchema, passThroughValidator) },
             async (args: any) => callTool(tool.name, args) as any
         );
     }
     return server;
 }
 
-export { buildServer, callTool, TOOLS, getAccessToken, ensureUrlOrId, validateId, redactSecrets,
-    CROP_LOCATIONS, RemoveBgSchema, ModelCropSchema, ColorMatchingSchema, JobIdSchema };
+export { buildServer, callTool, TOOLS, readRepoVersion, getAccessToken, ensureUrlOrId, validateId, redactSecrets,
+    CROP_LOCATIONS, RemoveBgSchema, ModelCropSchema, ColorMatchingSchema, ColorMarkerSchema, JobIdSchema };
 
 if (process.env.NODE_ENV !== 'test') {
     // legacy: 'serve' (the default) keeps pre-2026 clients working through the

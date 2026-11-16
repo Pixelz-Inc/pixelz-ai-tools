@@ -22,6 +22,12 @@ PRESIGN_OK = {
 }
 
 
+def _image(tmp_path):
+    path = tmp_path / 'x.jpg'
+    path.write_bytes(b'x')
+    return str(path)
+
+
 def _response(status, body):
     """A requests-like double whose raise_for_status behaves like the real thing."""
     r = MagicMock()
@@ -86,7 +92,7 @@ def test_every_tool_request_goes_through_the_status_check():
 
 
 @patch.dict(os.environ, ENV, clear=False)
-def test_s3_upload_failure_is_not_reported_as_success():
+def test_s3_upload_failure_is_not_reported_as_success(tmp_path):
     """
     ensure_url returned the DownloadUrl unconditionally, so a failed S3 PUT produced a URL
     for an object that was never stored and the retouching job was created against it.
@@ -98,20 +104,20 @@ def test_s3_upload_failure_is_not_reported_as_success():
     with patch.object(mod._session, 'post', return_value=presign), \
          patch.object(mod._session, 'put', return_value=put):
         with pytest.raises(requests.exceptions.HTTPError):
-            mod.ensure_url(os.path.abspath(__file__))
+            mod.ensure_url(_image(tmp_path))
 
 
 @patch.dict(os.environ, ENV, clear=False)
-def test_presign_documented_envelope_is_accepted():
+def test_presign_documented_envelope_is_accepted(tmp_path):
     mod = load_platform_server()
     with patch.object(mod._session, 'post', return_value=_response(200, PRESIGN_OK)), \
          patch.object(mod._session, 'put', return_value=_response(200, {})) as put:
-        assert mod.ensure_url(os.path.abspath(__file__)) == 'https://s3.example/get'
+        assert mod.ensure_url(_image(tmp_path)) == 'https://s3.example/get'
     assert put.call_args[0][0] == 'https://s3.example/put'
 
 
 @patch.dict(os.environ, ENV, clear=False)
-def test_presign_rejected_credentials_are_an_auth_error_not_a_missing_feature():
+def test_presign_rejected_credentials_are_an_auth_error_not_a_missing_feature(tmp_path):
     """The live API answers bad credentials with HTTP 200 and ErrorCode InvalidCustomerInformation;
     that used to be reported as "account not enabled for direct file uploads"."""
     mod = load_platform_server()
@@ -119,5 +125,5 @@ def test_presign_rejected_credentials_are_an_auth_error_not_a_missing_feature():
                 'Message': 'The ContactEmail and ContactAPIkey could not be validated.', 'PostingUrls': None}
     with patch.object(mod._session, 'post', return_value=_response(200, rejected)):
         with pytest.raises(Exception) as exc:
-            mod.ensure_url(os.path.abspath(__file__))
+            mod.ensure_url(_image(tmp_path))
     assert str(exc.value).startswith('[AUTH_ERROR]')

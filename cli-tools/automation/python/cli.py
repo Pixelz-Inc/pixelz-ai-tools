@@ -4,72 +4,31 @@ import json
 import re
 import time
 import threading
-import mimetypes
 import requests
-from urllib.parse import quote, quote_plus
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-import argparse
-from dotenv import load_dotenv
 
-load_dotenv(os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../shared/python')))
+import pixelz_common
+from pixelz_common import (
+    validate_id, is_read_timeout as _is_read_timeout, AUTOMATION_UPLOAD_EXTENSIONS, AUTOMATION_MIME_TYPES,
+    HEX_COLOR, CROP_LOCATIONS, UPLOAD_UNAVAILABLE, is_url, float_arg, true_false_arg, CliParser, RootParser)
+
+pixelz_common.load_env(__file__)
 
 # Overridable so tests can point at a local stub and assert the exact outgoing payload.
 AUTH_URL = os.environ.get('PIXELZ_AUTOMATION_AUTH_URL', 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token')
-
-def redact_secrets(text):
-    """Replace known credential values and bearer tokens in text with <REDACTED>.
-
-    Credentials are matched in raw AND percent-encoded form. Automation creds travel in a
-    form-encoded POST body, so they appear percent-encoded wherever requests echoes that
-    body or a redirected URL, and a literal match would silently miss them. The param-name
-    pass is the backstop for any encoding these variants don't anticipate.
-    """
-    s = str(text)
-    for key in ('PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'):
-        val = os.getenv(key)
-        if not val:
-            continue
-        for variant in {val, quote(val, safe=''), quote_plus(val)}:
-            s = s.replace(variant, '<REDACTED>')
-    s = re.sub(r'(client_id|client_secret)=[^&\s\'"]*', r'\1=<REDACTED>', s, flags=re.IGNORECASE)
-    s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
-    return s
 BASE_URL = os.environ.get('PIXELZ_AUTOMATION_BASE_URL', 'https://automation-api.pixelz.com/v1')
 # Overridable so tests can exercise the timeout path without waiting 90 s.
 REQUEST_TIMEOUT = float(os.environ.get('PIXELZ_REQUEST_TIMEOUT_SECONDS') or 90)
 
-def _is_read_timeout(e):
-    """requests reports a timeout while reading the body as ConnectionError(ReadTimeoutError)."""
-    import urllib3
-    return bool(e.args) and isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError)
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+_session = pixelz_common.make_session()
 
-# raise_on_status=False: once retries run out, hand back the last response so raise_for_status()
-# reports [HTTP_<status>] (as Node does) instead of an uncategorized RetryError.
-# retry_after_max: the same 60 s ceiling as Node, so a huge Retry-After cannot park a call for hours.
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True,
-               raise_on_status=False, retry_after_max=60)
-_session = requests.Session()
-_session.mount('https://', HTTPAdapter(max_retries=_retry))
-_session.mount('http://', HTTPAdapter(max_retries=_retry))
-
-_log_file = os.getenv('PIXELZ_LOG_FILE')
-
-def log(level, message, data=None):
-    if not _log_file:
-        return
-    from datetime import datetime, timezone
-    entry = f"[{datetime.now(timezone.utc).isoformat()}] [{level}] {message}"
-    if data is not None:
-        entry += f" {json.dumps(data, default=str)}"
-    # Redacted here, not at call sites: error text can carry a credentialed request URL.
-    with open(_log_file, 'a') as f:
-        f.write(redact_secrets(entry) + '\n')
-
-def validate_id(value, name):
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
-        raise ValueError(f"Invalid {name}: contains unexpected characters")
+# Credentials are matched in raw AND percent-encoded form. Automation creds travel in a
+# form-encoded POST body, so they appear percent-encoded wherever requests echoes that
+# body or a redirected URL, and a literal match would silently miss them. The param-name
+# pass is the backstop for any encoding these variants don't anticipate.
+redact_secrets = pixelz_common.make_redactor(
+    ('PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'), ('client_id', 'client_secret'))
+log = pixelz_common.make_logger(redact_secrets)
 
 _token_cache = {'token': None, 'expires_at': 0}
 _token_lock = threading.Lock()
@@ -97,41 +56,112 @@ def get_token():
         _token_cache['expires_at'] = time.time() + (data.get('expires_in', 3600) - 60)
         return _token_cache['token']
 
+def check_local_input(input_path):
+    """Rejects a bad local file before the token exchange, so it costs no round-trip."""
+    if not is_url(input_path):
+        pixelz_common.resolve_local_file(input_path, AUTOMATION_UPLOAD_EXTENSIONS)
+
 def ensure_url_or_id(input_path, token):
     if not input_path:
         return None
-    if input_path.startswith(('http://', 'https://')):
+    if is_url(input_path):
         return input_path
-    if not os.path.exists(input_path):
-        raise Exception(f"Local file not found: {input_path}")
-    resolved = os.path.realpath(input_path)
-    if not os.path.isfile(resolved):
-        raise Exception(f"Not a regular file: {input_path}")
-    file_size = os.path.getsize(resolved)
-    if file_size > MAX_FILE_SIZE:
-        raise Exception(f"File too large ({file_size / (1024**3):.2f} GB). Maximum allowed size is 2 GB.")
+    resolved, file_size = pixelz_common.resolve_local_file(input_path, AUTOMATION_UPLOAD_EXTENSIONS)
     headers = {'Authorization': f'Bearer {token}'}
     file_name = os.path.basename(resolved)
     log('info', 'Requesting upload URL', {'fileName': file_name})
     r = _session.post(f"{BASE_URL}/files/request-upload-url", json={'fileName': file_name}, headers=headers, timeout=REQUEST_TIMEOUT)
+    if r.status_code == 403:
+        raise Exception(UPLOAD_UNAVAILABLE)
     r.raise_for_status()
-    upload_url = r.json()['url']
-    content_type = mimetypes.guess_type(resolved)[0] or 'application/octet-stream'
+    body = r.json()
+    upload_url = body.get('url') if isinstance(body, dict) else None
+    if not upload_url:
+        raise Exception("Upload URL request returned an unexpected response.")
+    # The allowlist keeps this a known type; octet-stream only applies under PIXELZ_UPLOAD_ANY_FILE_TYPE.
+    content_type = AUTOMATION_MIME_TYPES.get(os.path.splitext(input_path)[1].lower(), 'application/octet-stream')
     log('info', 'Uploading file', {'fileName': file_name, 'size': file_size})
     with open(resolved, 'rb') as f:
         r_put = _session.put(upload_url, data=f, headers={'Content-Type': content_type}, timeout=REQUEST_TIMEOUT)
         r_put.raise_for_status()
     return upload_url
 
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+def _validation_error(message):
+    return ValueError(f"[VALIDATION_ERROR] {message}")
+
+def parse_markers(text):
+    """Validate MARKERS_JSON against the API's ColorMarker schema; return the parsed markers."""
+    try:
+        markers = json.loads(text)
+    except ValueError:
+        raise _validation_error('MARKERS_JSON is not valid JSON') from None
+    if not isinstance(markers, list) or not markers:
+        raise _validation_error('MARKERS_JSON must be a non-empty JSON array of markers')
+    for i, m in enumerate(markers):
+        at = f'MARKERS_JSON[{i}]'
+        if not isinstance(m, dict):
+            raise _validation_error(f'{at} must be an object')
+        if not _is_int(m.get('x_coordinate')) or not _is_int(m.get('y_coordinate')):
+            raise _validation_error(f'{at} needs integer x_coordinate and y_coordinate')
+        has_color = m.get('swatch_color_code') is not None
+        has_image = m.get('swatch_image') is not None
+        if has_color == has_image:
+            raise _validation_error(f'{at} needs exactly one of swatch_color_code or swatch_image')
+        if has_color and not (isinstance(m['swatch_color_code'], str) and HEX_COLOR.fullmatch(m['swatch_color_code'])):
+            raise _validation_error(f'{at}.swatch_color_code must be a hex colour like #FF5733')
+        if has_image:
+            s = m['swatch_image']
+            if not (isinstance(s, dict) and isinstance(s.get('swatch_image_url'), str) and s['swatch_image_url']
+                    and _is_int(s.get('x_coordinate')) and _is_int(s.get('y_coordinate'))):
+                raise _validation_error(f'{at}.swatch_image needs swatch_image_url and integer x_coordinate and y_coordinate')
+    return markers
+
+def validate_args(args):
+    """Local checks that must fail before any request, mirroring the Node CLI. Returns the parsed markers, if any."""
+    cmd = args.command
+    missing = [f'<{n}>' for n in ('input', 'markers', 'job_id') if getattr(args, n, None) == '']
+    if missing:
+        raise _validation_error(f"{cmd} requires {', '.join(missing)}")
+    markers = None
+    if cmd == 'status':
+        validate_id(args.job_id, 'jobId')
+    if cmd == 'remove-bg':
+        if args.color is not None and not HEX_COLOR.fullmatch(args.color):
+            raise _validation_error('--color must be a hex colour like #FF5733')
+    if cmd in ('remove-bg', 'create-mask') and args.feather is not None and args.feather < 0:
+        raise _validation_error('--feather must be >= 0')
+    if cmd == 'remove-bg':
+        # The API takes exactly one of the two ("do not set both, and do not leave both unset").
+        transparent = args.transparent == 'true' if args.transparent else (not args.color)
+        if args.color and transparent:
+            raise _validation_error('--color and --transparent true cannot be used together')
+        if not args.color and not transparent:
+            raise _validation_error('--transparent false requires --color')
+        args.transparent = transparent
+    elif cmd == 'color-match':
+        markers = parse_markers(args.markers)
+    elif cmd == 'model-crop':
+        if args.top is None and args.bottom is None:
+            raise _validation_error('model-crop requires at least one of --top or --bottom')
+        for flag, value in (('--top', args.top), ('--bottom', args.bottom)):
+            if value is not None and value not in CROP_LOCATIONS:
+                raise _validation_error(f"{flag} must be one of: {', '.join(CROP_LOCATIONS)}")
+    if cmd in ('remove-bg', 'color-match', 'create-mask', 'create-trimap', 'model-crop'):
+        check_local_input(args.input)
+    return markers
+
 def main():
-    parser = argparse.ArgumentParser(description='Pixelz Automation CLI')
-    subparsers = parser.add_subparsers(dest='command')
+    parser = RootParser(description='Pixelz Automation CLI')
+    subparsers = parser.add_subparsers(dest='command', parser_class=CliParser)
 
     remove_bg = subparsers.add_parser('remove-bg')
     remove_bg.add_argument('input')
-    remove_bg.add_argument('--color')
-    remove_bg.add_argument('--transparent', choices=['true', 'false'])
-    remove_bg.add_argument('--feather', type=float)
+    remove_bg.add_argument('--color', help='Background colour as #RRGGBB (not with --transparent true)')
+    remove_bg.add_argument('--transparent', type=true_false_arg, metavar='{true,false}')
+    remove_bg.add_argument('--feather', type=float_arg)
     remove_bg.add_argument('--trimap')
     remove_bg.add_argument('--callback')
     remove_bg.add_argument('--sync', action='store_true', help='Run synchronously and return result immediately (may time out on large images)')
@@ -144,7 +174,7 @@ def main():
 
     create_mask = subparsers.add_parser('create-mask')
     create_mask.add_argument('input')
-    create_mask.add_argument('--feather', type=float)
+    create_mask.add_argument('--feather', type=float_arg)
     create_mask.add_argument('--trimap')
     create_mask.add_argument('--callback')
     create_mask.add_argument('--sync', action='store_true')
@@ -156,7 +186,7 @@ def main():
 
     model_crop = subparsers.add_parser('model-crop')
     model_crop.add_argument('input')
-    model_crop.add_argument('--top')
+    model_crop.add_argument('--top', help='At least one of --top / --bottom. One of: ' + ', '.join(CROP_LOCATIONS))
     model_crop.add_argument('--bottom')
     model_crop.add_argument('--callback')
     model_crop.add_argument('--sync', action='store_true')
@@ -166,9 +196,8 @@ def main():
 
     subparsers.add_parser('get-key')
 
-    args = parser.parse_args()
-    if not args.command:
-        parser.print_help()
+    args = pixelz_common.parse_cli_args(parser)
+    if args is None:
         return
 
     def make_headers(sync=False):
@@ -181,14 +210,9 @@ def main():
         # Inside the try: a failure here (network, bad credentials, non-2xx from Keycloak)
         # must reach the handlers below so it is redacted and categorized. Called outside,
         # it escaped as a raw traceback carrying the unredacted OAuth request.
-        if args.command == 'remove-bg':
-            # Before the token exchange, as in the Node CLI: a bad flag combination should neither
-            # cost a round-trip nor surface as [AUTH_ERROR]. The API takes exactly one of the two.
-            transparent = args.transparent == 'true' if args.transparent else (not args.color)
-            if args.color and transparent:
-                raise ValueError("[VALIDATION_ERROR] --color and --transparent true cannot be used together")
-            if not args.color and not transparent:
-                raise ValueError("[VALIDATION_ERROR] --transparent false requires --color")
+        # Validation comes first, as in the Node CLI: a bad argument should neither cost a
+        # round-trip nor surface as [AUTH_ERROR].
+        markers = validate_args(args)
 
         token = get_token()
 
@@ -198,7 +222,7 @@ def main():
             payload = {
                 'image_url': url_or_id,
                 'background_color': args.color,
-                'transparent_background': transparent,
+                'transparent_background': args.transparent,
                 'feather_width': args.feather,
                 'trimap_url': args.trimap,
                 'callback_url': args.callback
@@ -212,8 +236,8 @@ def main():
             url_or_id = ensure_url_or_id(args.input, token)
             payload = {
                 'image_url': url_or_id,
-                'color_markers': json.loads(args.markers),
-                'callback_url': args.callback if hasattr(args, 'callback') else None
+                'color_markers': markers,
+                'callback_url': args.callback
             }
             payload = {k: v for k, v in payload.items() if v is not None}
             r = _session.post(f"{BASE_URL}/images/color-matching", json=payload, headers=make_headers(args.sync), timeout=REQUEST_TIMEOUT)
@@ -257,7 +281,6 @@ def main():
             r.raise_for_status()
             print(json.dumps(r.json(), indent=2))
         elif args.command == 'status':
-            validate_id(args.job_id, 'jobId')
             log('info', 'status', {'jobId': args.job_id})
             r = _session.get(f"{BASE_URL}/images/jobs/{args.job_id}/status", headers=make_headers(sync=True), timeout=REQUEST_TIMEOUT)
             r.raise_for_status()

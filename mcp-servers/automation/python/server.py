@@ -1,85 +1,54 @@
 import os
+import sys
 import json
 import re
 import time
 import threading
-import mimetypes
 import requests
 from typing import Annotated
 from pydantic import Field
-from urllib.parse import quote, quote_plus
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
-from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
 from mcp.server.caching import CacheHint
+from mcp.types import ToolAnnotations
 # Raised (not returned) so the result carries isError: true, as the Node servers' do; the SDK
 # passes a ToolError's message through, where any other exception becomes 'Error executing tool'.
 from mcp.server.mcpserver.exceptions import ToolError
 
-_dotenv_path = os.environ.get('PIXELZ_DOTENV_PATH') or os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../.env'))
-load_dotenv(_dotenv_path)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../shared/python')))
+import pixelz_common
+from pixelz_common import (
+    validate_id, is_read_timeout as _is_read_timeout, is_url, HEX_COLOR, CROP_LOCATIONS, UPLOAD_UNAVAILABLE,
+    validate_required_str as _validate_required_str, validate_hex_color as _validate_hex_color)
+
+pixelz_common.load_env(__file__)
+
+def _read_repo_version():
+    return pixelz_common.read_repo_version(__file__)
 
 # The tool list is static and carries no per-account data, so clients can cache it and
 # shared intermediaries may too (SEP-2549). Mirrors the Node server's cacheHints.
 mcp = MCPServer(
     "pixelz-automation-mcp",
+    version=_read_repo_version(),
     cache_hints={"tools/list": CacheHint(ttl_ms=3_600_000, scope="public")},
 )
+
+# MCP tool annotations (hints for clients deciding whether to ask the user before a call).
+READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+CREATES_JOB = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 AUTH_URL = 'https://id.pixelz.com/realms/pixelz-automations/protocol/openid-connect/token'
 BASE_URL = 'https://automation-api.pixelz.com/v1'
 REQUEST_TIMEOUT = 90
 
-def _is_read_timeout(e):
-    """requests reports a timeout while reading the body as ConnectionError(ReadTimeoutError)."""
-    import urllib3
-    return bool(e.args) and isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError)
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
+_session = pixelz_common.make_session()
 
-# raise_on_status=False: once retries run out, hand back the last response so raise_for_status()
-# reports [HTTP_<status>] (as Node does) instead of an uncategorized RetryError.
-# retry_after_max: the same 60 s ceiling as Node, so a huge Retry-After cannot park a call for hours.
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 502, 503, 504], respect_retry_after_header=True,
-               raise_on_status=False, retry_after_max=60)
-_session = requests.Session()
-_session.mount('https://', HTTPAdapter(max_retries=_retry))
-_session.mount('http://', HTTPAdapter(max_retries=_retry))
-
-_log_file = os.getenv('PIXELZ_LOG_FILE')
-
-def redact_secrets(text):
-    """Replace known credential values and bearer tokens in text with <REDACTED>.
-
-    Credentials are matched in raw AND percent-encoded form. Automation creds travel in a
-    form-encoded POST body, so they appear percent-encoded wherever requests echoes that
-    body or a redirected URL, and a literal match would silently miss them. The param-name
-    pass is the backstop for any encoding these variants don't anticipate.
-    """
-    s = str(text)
-    for key in ('PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'):
-        val = os.getenv(key)
-        if not val:
-            continue
-        for variant in {val, quote(val, safe=''), quote_plus(val)}:
-            s = s.replace(variant, '<REDACTED>')
-    s = re.sub(r'(client_id|client_secret)=[^&\s\'"]*', r'\1=<REDACTED>', s, flags=re.IGNORECASE)
-    s = re.sub(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<REDACTED>', s)
-    return s
-
-def log(level, message, data=None):
-    if not _log_file:
-        return
-    from datetime import datetime, timezone
-    entry = f"[{datetime.now(timezone.utc).isoformat()}] [{level}] {message}"
-    if data is not None:
-        entry += f" {json.dumps(data, default=str)}"
-    # Redacted here, not at call sites: error text can carry a credentialed request URL.
-    with open(_log_file, 'a') as f:
-        f.write(redact_secrets(entry) + '\n')
-
-def validate_id(value, name):
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', value):
-        raise ValueError(f"Invalid {name}: contains unexpected characters")
+# Credentials are matched in raw AND percent-encoded form. Automation creds travel in a
+# form-encoded POST body, so they appear percent-encoded wherever requests echoes that
+# body or a redirected URL, and a literal match would silently miss them. The param-name
+# pass is the backstop for any encoding these variants don't anticipate.
+redact_secrets = pixelz_common.make_redactor(
+    ('PIXELZ_AUTOMATION_CLIENT_ID', 'PIXELZ_AUTOMATION_CLIENT_SECRET'), ('client_id', 'client_secret'))
+log = pixelz_common.make_logger(redact_secrets)
 
 _token_cache = {'token': None, 'expires_at': 0}
 _token_lock = threading.Lock()
@@ -104,21 +73,21 @@ def get_token():
 
 def ensure_url_or_id(input_path, token):
     if not input_path: return None
-    if input_path.startswith(('http://', 'https://')): return input_path
-    if not os.path.exists(input_path): raise Exception(f"Local file not found: {input_path}")
-    resolved = os.path.realpath(input_path)
-    if not os.path.isfile(resolved):
-        raise Exception(f"Not a regular file: {input_path}")
-    file_size = os.path.getsize(resolved)
-    if file_size > MAX_FILE_SIZE:
-        raise Exception(f"File too large ({file_size / (1024**3):.2f} GB). Maximum allowed size is 2 GB.")
+    if is_url(input_path): return input_path
+    resolved, file_size = pixelz_common.resolve_local_file(input_path, pixelz_common.AUTOMATION_UPLOAD_EXTENSIONS)
     headers = {'Authorization': f'Bearer {token}'}
     file_name = os.path.basename(resolved)
     log('info', 'Requesting upload URL', {'fileName': file_name})
     r = _session.post(f"{BASE_URL}/files/request-upload-url", json={'fileName': file_name}, headers=headers, timeout=REQUEST_TIMEOUT)
+    if r.status_code == 403:
+        raise Exception(UPLOAD_UNAVAILABLE)
     r.raise_for_status()
-    upload_url = r.json()['url']
-    content_type = mimetypes.guess_type(resolved)[0] or 'application/octet-stream'
+    body = r.json()
+    upload_url = body.get('url') if isinstance(body, dict) else None
+    if not upload_url:
+        raise Exception("Upload URL request returned an unexpected response.")
+    # Not mimetypes.guess_type: that reads the OS registry on Windows and differs from Node.
+    content_type = pixelz_common.AUTOMATION_MIME_TYPES.get(os.path.splitext(resolved)[1].lower(), 'application/octet-stream')
     log('info', 'Uploading file', {'fileName': file_name, 'size': file_size})
     with open(resolved, 'rb') as f:
         _session.put(upload_url, data=f, headers={'Content-Type': content_type}, timeout=REQUEST_TIMEOUT).raise_for_status()
@@ -129,13 +98,6 @@ def api_headers(token, sync=False):
     if not sync:
         h['Respond-Mode'] = 'async'
     return h
-
-CROP_LOCATIONS = [
-    'eye_higher', 'below_eye', 'btw_eye_and_nose', 'below_nose',
-    'between_nose_and_mouth', 'below_mouth', 'below_chin', 'chest',
-    'at_elbow_higher', 'at_elbow_lower', 'waist', 'below_buttock',
-    'main_body_axis', 'mid_thigh', 'above_knee', 'at_knee', 'below_knee'
-]
 
 def _format_error(tool_name, e):
     """Format errors with categorized prefixes matching Node.js MCP parity."""
@@ -154,7 +116,7 @@ def _format_error(tool_name, e):
     elif isinstance(e, requests.exceptions.JSONDecodeError):
         # A 2xx that is not JSON is a proxy or login page, not a bad argument.
         msg = f"[API_ERROR] Expected a JSON response: {e}"
-    elif isinstance(e, ValueError) and not str(e).startswith('[AUTH_ERROR]'):
+    elif isinstance(e, ValueError) and not re.match(r'\[[A-Z0-9_]+\]', str(e)):
         msg = f"[VALIDATION_ERROR] {e}"
     else:
         msg = str(e)
@@ -163,23 +125,78 @@ def _format_error(tool_name, e):
     # No "Error: " prefix: the SDK already reports a ToolError as "Error executing tool <name>: ...".
     return msg
 
-def _validate_required_str(value, name):
-    if not value or not str(value).strip():
-        raise ValueError(f"{name}: must be a non-empty string")
-
-def _validate_hex_color(value, name):
-    if value is not None and not re.match(r'^#[0-9A-Fa-f]{6}$', value):
-        raise ValueError(f"{name}: must be a hex color like #FFFFFF")
-
 def _validate_crop_location(value, name):
     if value is not None and value not in CROP_LOCATIONS:
         raise ValueError(f"{name}: must be one of {', '.join(CROP_LOCATIONS)}")
 
-@mcp.tool()
+def _is_int(value):
+    # JSON 100.0 is an integer to the API (and to Node's z.number().int()); bool is not a number here.
+    return not isinstance(value, bool) and (isinstance(value, int) or (isinstance(value, float) and value.is_integer()))
+
+def _validate_color_markers(markers):
+    """Same rules as the Node ColorMarkerSchema (OpenAPI ColorMarker/SwatchImage)."""
+    if not isinstance(markers, list) or not markers:
+        raise ValueError("colorMarkers: must be a non-empty array")
+    marker_keys = {'x_coordinate', 'y_coordinate', 'swatch_color_code', 'swatch_image'}
+    swatch_keys = {'swatch_image_url', 'x_coordinate', 'y_coordinate'}
+    for i, m in enumerate(markers):
+        at = f"colorMarkers.{i}"
+        if not isinstance(m, dict):
+            raise ValueError(f"{at}: must be an object")
+        for key in m:
+            if key not in marker_keys:
+                raise ValueError(f'{at}: unrecognized key "{key}"')
+        for key in ('x_coordinate', 'y_coordinate'):
+            if not _is_int(m.get(key)):
+                raise ValueError(f"{at}.{key}: must be an integer")
+        code, swatch = m.get('swatch_color_code'), m.get('swatch_image')
+        if (code is not None) == (swatch is not None):
+            raise ValueError(f"{at}: exactly one of swatch_color_code or swatch_image is required")
+        if code is not None and (not isinstance(code, str) or not HEX_COLOR.fullmatch(code)):
+            raise ValueError(f"{at}.swatch_color_code: must be a hex color like #FFFFFF")
+        if swatch is not None:
+            if not isinstance(swatch, dict):
+                raise ValueError(f"{at}.swatch_image: must be an object")
+            for key in swatch:
+                if key not in swatch_keys:
+                    raise ValueError(f'{at}.swatch_image: unrecognized key "{key}"')
+            if not isinstance(swatch.get('swatch_image_url'), str) or not swatch['swatch_image_url']:
+                raise ValueError(f"{at}.swatch_image.swatch_image_url: must be a non-empty string")
+            for key in ('x_coordinate', 'y_coordinate'):
+                if not _is_int(swatch.get(key)):
+                    raise ValueError(f"{at}.swatch_image.{key}: must be an integer")
+
+# Mirrors the Node server's COLOR_MARKER_JSON_SCHEMA; _validate_color_markers enforces it.
+COLOR_MARKER_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "x_coordinate": {"type": "integer", "description": "Horizontal pixel position of the colour sample in the main image (centre of a 30x30 block; avoid shadows/highlights)."},
+        "y_coordinate": {"type": "integer", "description": "Vertical pixel position of the colour sample in the main image."},
+        "swatch_color_code": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$", "description": "Target colour as #RRGGBB. Mutually exclusive with swatch_image."},
+        "swatch_image": {
+            "type": "object",
+            "description": "Reference swatch image. Mutually exclusive with swatch_color_code.",
+            "properties": {
+                "swatch_image_url": {"type": "string", "description": "Public URL of the swatch image."},
+                "x_coordinate": {"type": "integer", "description": "Horizontal pixel position of the colour sample in the swatch image."},
+                "y_coordinate": {"type": "integer", "description": "Vertical pixel position of the colour sample in the swatch image."},
+            },
+            "required": ["swatch_image_url", "x_coordinate", "y_coordinate"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["x_coordinate", "y_coordinate"],
+    "additionalProperties": False,
+}
+
+# json_schema_extra advertises the enum without pydantic rejecting first, so the check in the tool keeps the [VALIDATION_ERROR] contract.
+CropLocation = Annotated[str, Field(json_schema_extra={"enum": list(CROP_LOCATIONS)})]
+
+@mcp.tool(annotations=CREATES_JOB)
 def remove_background(imagePath: Annotated[str, Field(description="Local file path or public URL")], backgroundColor: Annotated[str, Field(description="Hex color for replacement background (e.g. #FFFFFF). Mutually exclusive with transparentBackground.")] = None, transparentBackground: Annotated[bool, Field(description="Return a transparent PNG. Defaults to true if backgroundColor is not set.")] = None,
                       featherWidth: Annotated[float, Field(description="Soften subject edges. 0\u20131 = sharp, >1 = soft.")] = None, trimapUrl: Annotated[str, Field(description="URL of a trimap for improved edge quality. Generate one first with create_trimap.")] = None, callbackUrl: Annotated[str, Field(description="Webhook URL to receive result notification.")] = None,
                       sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it \u2014 may time out on large images.")] = False) -> str:
-    """AI-powered background removal. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0-1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Set sync=True only if the user explicitly requests it (risk of timeout)."""
+    """AI-powered background removal. Billed: 100 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. featherWidth softens edges (0-1=sharp, >1=soft). Pass trimapUrl from create_trimap for complex edges. Set sync=True only if the user explicitly requests it (risk of timeout)."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         _validate_hex_color(backgroundColor, 'backgroundColor')
@@ -207,13 +224,15 @@ def remove_background(imagePath: Annotated[str, Field(description="Local file pa
     except Exception as e:
         raise ToolError(_format_error('remove_background', e)) from e
 
-@mcp.tool()
-def color_matching(imagePath: Annotated[str, Field(description="Local file path or public URL")], colorMarkers: Annotated[list, Field(description="Array of marker objects. Each requires x_coordinate, y_coordinate, and either swatch_color_code (hex) or swatch_image (object with swatch_image_url, x_coordinate, y_coordinate).")], callbackUrl: str = None, sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
-    """AI-powered color correction. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. colorMarkers is an array of objects with x_coordinate, y_coordinate, and either swatch_color_code (hex) or swatch_image. Set sync=True only if the user explicitly requests it."""
+@mcp.tool(annotations=CREATES_JOB)
+def color_matching(imagePath: Annotated[str, Field(description="Local file path or public URL")],
+                   colorMarkers: Annotated[list, Field(description="Array of marker objects. Each requires x_coordinate, y_coordinate, and exactly one of swatch_color_code (hex) or swatch_image (object with swatch_image_url, x_coordinate, y_coordinate).",
+                                                       json_schema_extra={"minItems": 1, "items": COLOR_MARKER_JSON_SCHEMA})],
+                   callbackUrl: str = None, sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
+    """AI-powered color correction. Billed: 100 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Only set sync=true if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
-        if not colorMarkers or not isinstance(colorMarkers, list) or len(colorMarkers) == 0:
-            raise ValueError("colorMarkers: must be a non-empty array")
+        _validate_color_markers(colorMarkers)
         log('info', 'Tool called: color_matching')
         token = get_token()
         url = ensure_url_or_id(imagePath, token)
@@ -224,10 +243,10 @@ def color_matching(imagePath: Annotated[str, Field(description="Local file path 
     except Exception as e:
         raise ToolError(_format_error('color_matching', e)) from e
 
-@mcp.tool()
+@mcp.tool(annotations=CREATES_JOB)
 def create_mask(imagePath: Annotated[str, Field(description="Local file path or public URL")], featherWidth: Annotated[float, Field(description="Soften mask edges. 0\u20131 = sharp, >1 = soft.")] = None, trimapUrl: Annotated[str, Field(description="URL of a trimap for improved accuracy on complex edges.")] = None, callbackUrl: str = None,
                 sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
-    """Generate a greyscale silhouette mask (white=subject, black=background). Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Set sync=True only if the user explicitly requests it."""
+    """Generate a greyscale silhouette mask (white=subject, black=background). Billed: 100 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         if featherWidth is not None and featherWidth < 0:
@@ -242,9 +261,9 @@ def create_mask(imagePath: Annotated[str, Field(description="Local file path or 
     except Exception as e:
         raise ToolError(_format_error('create_mask', e)) from e
 
-@mcp.tool()
+@mcp.tool(annotations=CREATES_JOB)
 def create_trimap(imagePath: Annotated[str, Field(description="Local file path or public URL")], callbackUrl: str = None, sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
-    """Generate a trimap for complex subjects (hair, fur, transparent edges). Default: async — returns job_id. Pass result trimapUrl to remove_background or create_mask for higher quality edges. Set sync=True only if the user explicitly requests it."""
+    """Generate a trimap for complex subjects (hair, fur, transparent edges). Billed: 50 tokens per job. Default: async — returns job_id. Pass result trimapUrl to remove_background or create_mask for higher quality edges. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         log('info', 'Tool called: create_trimap')
@@ -257,14 +276,17 @@ def create_trimap(imagePath: Annotated[str, Field(description="Local file path o
     except Exception as e:
         raise ToolError(_format_error('create_trimap', e)) from e
 
-@mcp.tool()
-def model_crop(imagePath: Annotated[str, Field(description="Local file path or public URL")], topCropLocation: str = None, bottomCropLocation: str = None,
+@mcp.tool(annotations=CREATES_JOB)
+def model_crop(imagePath: Annotated[str, Field(description="Local file path or public URL")], topCropLocation: CropLocation = None, bottomCropLocation: CropLocation = None,
                callbackUrl: str = None, sync: Annotated[bool, Field(description="Run synchronously. Only use if user explicitly requests it.")] = False) -> str:
-    """Crop a model photograph using anatomical landmarks. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Valid locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Set sync=True only if the user explicitly requests it."""
+    """Crop a model photograph using anatomical landmarks. At least one of topCropLocation / bottomCropLocation is required. Billed: 10 tokens per job. Default: async — returns job_id immediately. Most jobs finish in 30-60 seconds; call get_job_status once to check, never in a loop. Valid locations: eye_higher, below_eye, btw_eye_and_nose, below_nose, between_nose_and_mouth, below_mouth, below_chin, chest, at_elbow_higher, at_elbow_lower, waist, below_buttock, main_body_axis, mid_thigh, above_knee, at_knee, below_knee. Set sync=True only if the user explicitly requests it."""
     try:
         _validate_required_str(imagePath, 'imagePath')
         _validate_crop_location(topCropLocation, 'topCropLocation')
         _validate_crop_location(bottomCropLocation, 'bottomCropLocation')
+        # API rule: at least one of the two locations must be given.
+        if not topCropLocation and not bottomCropLocation:
+            raise ValueError("at least one of topCropLocation or bottomCropLocation is required")
         log('info', 'Tool called: model_crop')
         token = get_token()
         url = ensure_url_or_id(imagePath, token)
@@ -275,9 +297,9 @@ def model_crop(imagePath: Annotated[str, Field(description="Local file path or p
     except Exception as e:
         raise ToolError(_format_error('model_crop', e)) from e
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 def get_job_status(jobId: str) -> str:
-    """Check the status of any async Automation job. Most jobs finish in 30-60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. Read status.status_name: Created/ReadyForProcess/Processing = still working, report status and check again later; Completed or Delivered = result.result_image_url is ready; Failed = report the error to the user and ask whether to resubmit."""
+    """Check the status of any async Automation job (free). Most jobs finish in 30-60 seconds; large images can take several minutes. Call this once per check — never loop on it, since you cannot wait out an interval mid-turn. Read status.status_name: Created/ReadyForProcess/Processing = still working, report status and check again later; Completed or Delivered = result.result_image_url is ready; Failed = report the error to the user and ask whether to resubmit."""
     try:
         validate_id(jobId, 'jobId')
         log('info', 'Tool called: get_job_status', {'jobId': jobId})
@@ -287,7 +309,7 @@ def get_job_status(jobId: str) -> str:
     except Exception as e:
         raise ToolError(_format_error('get_job_status', e)) from e
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 def get_webhook_public_key() -> str:
     """Retrieve the ECDSA public key used to verify Pixelz Automation webhook payload signatures. Store this key in your application to validate incoming webhook requests."""
     try:
