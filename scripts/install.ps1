@@ -206,18 +206,18 @@ if (-not $langPref) {
 if ($langPref -eq "node") {
     $helperRuntime = "node"; $runtime = "node"
     Assert-Command "node" "Node.js"
-    # process.loadEnvFile and fs.openAsBlob are stable from 22.21; earlier 22.x mostly works.
+    # 24.11 is the first LTS release of the oldest Node line this project supports and tests.
     # Compared here rather than in `node -e`: PowerShell 5.1 strips the inner quotes from native
     # command arguments, which turned split(".") into a syntax error.
     $nodeVersion = [version](node -p process.versions.node)
-    if ($nodeVersion -lt [version]'22.21.0') { Write-Host "WARNING: Node.js v$nodeVersion is older than the supported v22.21." -ForegroundColor Yellow }
+    if ($nodeVersion -lt [version]'24.11.0') { Write-Host "WARNING: Node.js v$nodeVersion is older than the supported v24.11." -ForegroundColor Yellow }
     $helperScript = Join-Path $ScriptDir "agent-config.mjs"
 } else {
     $helperRuntime = "python"
     Assert-Command "python" "Python"
     # The `python` on PATH can be the Microsoft Store placeholder, which exists but only opens the Store.
-    python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" *> $null
-    if ($LASTEXITCODE -ne 0) { Stop-Install "Python 3.10+ is required for the Python track ('python' may be the Microsoft Store placeholder)." }
+    python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" *> $null
+    if ($LASTEXITCODE -ne 0) { Stop-Install "Python 3.12+ is required for the Python track ('python' may be the Microsoft Store placeholder)." }
     # The tools run from a virtual environment created once the scope is known; this
     # interpreter only runs the helper and creates it.
     $helperScript = Join-Path $ScriptDir "agent_config.py"

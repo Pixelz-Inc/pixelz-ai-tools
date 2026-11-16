@@ -57,9 +57,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 22 is the supported floor (engines >=22.21.0), 24 the current line.
+        # 24 is the supported floor (engines >=24.11.0), 26 the active LTS.
         os: [ubuntu-latest]
-        node: ['22', '24']
+        node: ['24', '26']
         include:
           # Windows is shipped to (PowerShell installer, Windows-specific code paths), so test it once.
           - os: windows-latest
@@ -119,8 +119,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.10 is the supported floor, 3.12 the version the other jobs use.
-        python: ['3.10', '3.12']
+        # 3.12 is the supported floor (and what the other jobs use), 3.14 a current release.
+        python: ['3.12', '3.14']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

@@ -1,6 +1,6 @@
 {
   "name": "pixelz-ai-tools",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Connect Pixelz image retouching APIs to AI coding assistants via MCP servers and Agent Skills",
   "scripts": {
     "test": "cd tests/node && pnpm exec vitest run",
@@ -18,7 +18,7 @@
     "agent-skills"
   ],
   "engines": {
-    "node": ">=22.21.0"
+    "node": ">=24.11.0"
   },
   "author": "Pixelz",
   "license": "MIT",

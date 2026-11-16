@@ -5,8 +5,12 @@ the installers print it, and a local install records it in `.pixelz/VERSION`.
 
 To update an existing install: `git pull`, then re-run the installer with the same choices.
 
-## Unreleased
+## 2.2.0 — 2026-11-16
 
+- **Minimum versions raised: Node.js 24.11 and Python 3.12** (were 22.21 and 3.10). Python 3.10
+  reached end of life in October 2026 and Node 22 does in April 2027; the new minimums are
+  supported until April 2028 (Node 24) and October 2028 (Python 3.12). CI now tests Node 24 and
+  26 and Python 3.12 and 3.14. The installers warn on an older Node and refuse an older Python.
 - Dependencies: `@modelcontextprotocol/server` 2.4.0, `zod` 4.6.7, `@types/node` 24.19.2,
   `python-dotenv` 1.2.4, `ruff` 0.17.4, `responses` 0.26.3, and the `setup-python` /
   `pnpm/action-setup` actions. Clears every `pnpm audit` advisory: the MCP SDK's nested `zod`

@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- Node.js v22.21+ (`process.loadEnvFile` is stable from 22.21)
-- Python v3.10+
+- Node.js v24.11+ (the first LTS release of the 24 line)
+- Python v3.12+
 - pnpm v11+ and pip
 
 Use pnpm, not npm: the supply-chain settings (7-day release quarantine, no install scripts,

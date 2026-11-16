@@ -149,12 +149,12 @@ ensure_env() {
     fi
 }
 
-# The first Python 3.10+ that actually runs. On Windows (Git Bash) `python3` is often the
+# The first Python 3.12+ that actually runs. On Windows (Git Bash) `python3` is often the
 # Microsoft Store placeholder: on PATH, but it only opens the Store.
 find_python() {
     local c
     for c in python3 python; do
-        "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' &> /dev/null && { echo "$c"; return; }
+        "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' &> /dev/null && { echo "$c"; return; }
     done
 }
 
@@ -219,13 +219,13 @@ fi
 if [ "$LANG_PREF" == "node" ]; then
     RUNTIME="node"
     require_cmd node "Node.js"
-    # process.loadEnvFile and fs.openAsBlob are stable from 22.21; earlier 22.x mostly works.
-    node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 21) ? 0 : 1)' \
-        || echo "WARNING: Node.js $(node --version) is older than the supported v22.21."
+    # 24.11 is the first LTS release of the oldest Node line this project supports and tests.
+    node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 24 || (a === 24 && b >= 11) ? 0 : 1)' \
+        || echo "WARNING: Node.js $(node --version) is older than the supported v24.11."
     HELPER=(node "$SCRIPT_DIR/agent-config.mjs")
 else
     PY="$(find_python)"
-    [ -n "$PY" ] || { echo "Error: Python 3.10+ is required for the Python track but none was found (on Windows, 'python3' may be the Microsoft Store placeholder)."; exit 1; }
+    [ -n "$PY" ] || { echo "Error: Python 3.12+ is required for the Python track but none was found (on Windows, 'python3' may be the Microsoft Store placeholder)."; exit 1; }
     # The tools run from a virtual environment created once the scope is known; this
     # interpreter only runs the helper and creates it.
     HELPER=("$PY" "$SCRIPT_DIR/agent_config.py")

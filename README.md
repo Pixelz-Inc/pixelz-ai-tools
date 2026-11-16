@@ -8,9 +8,9 @@ Connect the **Pixelz Platform** and **Pixelz Automation** APIs directly to your 
 
 | Requirement | Version | Check |
 |-------------|---------|-------|
-| Node.js | v22.21 or higher | `node --version` |
+| Node.js | v24.11 or higher | `node --version` |
 | pnpm | v11 or higher — only for the Node.js MCP track | `pnpm --version` |
-| Python | v3.10 or higher | `python --version` |
+| Python | v3.12 or higher | `python --version` |
 | Python `venv` module | Included with Python; Debian/Ubuntu need `sudo apt install python3-venv` | `python -m venv --help` |
 
 You only need Node.js **or** Python depending on your language choice during installation — not both. The Node.js CLI tools use only Node's built-ins (`fetch`, `process.loadEnvFile`), so the Node.js Skills track installs no packages at all.
